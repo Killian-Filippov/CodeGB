@@ -64,7 +64,7 @@ JAVA_KG_DB_PATH=.javakg pnpm exec tsx packages/mcp-server/src/cli.ts
 统一开关：
 - `CODEGB_DB_BACKEND=wasm|native|auto`
 - 默认值：`wasm`（兼容性优先）
-- `auto`：优先尝试 `native`，失败后自动降级到 `wasm`，并打印一次性诊断日志
+- `auto`：优先尝试 `wasm`，失败后自动回退到 `native`，并打印一次性诊断日志
 
 > 说明：后端切换能力已在 core 层实现，具体运行策略可通过启动配置统一管理。
 

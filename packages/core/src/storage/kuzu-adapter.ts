@@ -18,6 +18,7 @@ const require = createRequire(import.meta.url);
 
 type KuzuQueryResult = {
   getAll: () => Promise<Array<Record<string, unknown>>>;
+  close?: () => void;
 };
 
 type KuzuPreparedStatement = {
@@ -96,7 +97,7 @@ export class KuzuAdapter {
   private readonly backend: DbBackend;
   private readonly workerClient?: KuzuWorkerClient;
   private readonly loadKuzuRuntime: () => KuzuRuntime | null;
-  private nativeFallbackActivated = false;
+  private autoNativeFallbackActivated = false;
 
   constructor(storagePath: string, options: KuzuAdapterOptions = {}) {
     this.storagePath = storagePath;
@@ -126,7 +127,8 @@ export class KuzuAdapter {
   private async ensureSchema(connection: KuzuConnection): Promise<void> {
     for (const query of JAVA_SCHEMA_QUERIES) {
       try {
-        await connection.query(query);
+        const queryResult = await connection.query(query);
+        this.closeQueryResults(queryResult);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (!/already exists/i.test(message)) {
@@ -141,7 +143,11 @@ export class KuzuAdapter {
     const results = Array.isArray(queryResult) ? queryResult : [queryResult];
     const rows: Array<Record<string, unknown>> = [];
     for (const result of results) {
-      rows.push(...(await this.resultToRows(result)));
+      try {
+        rows.push(...(await this.resultToRows(result)));
+      } finally {
+        result.close?.();
+      }
     }
     return rows;
   }
@@ -151,7 +157,28 @@ export class KuzuAdapter {
   }
 
   private async clearGraph(connection: KuzuConnection): Promise<void> {
-    await connection.query('MATCH (n:Symbol) DETACH DELETE n');
+    const queryResult = await connection.query('MATCH (n:Symbol) DETACH DELETE n');
+    this.closeQueryResults(queryResult);
+  }
+
+  private closeQueryResults(result: KuzuQueryResult | KuzuQueryResult[]): void {
+    if (Array.isArray(result)) {
+      for (const item of result) {
+        item.close?.();
+      }
+      return;
+    }
+    result.close?.();
+  }
+
+  private shouldPreferWasmPath(): boolean {
+    if (this.backend === 'wasm') {
+      return true;
+    }
+    if (this.backend === 'auto') {
+      return !this.autoNativeFallbackActivated;
+    }
+    return false;
   }
 
   private getShouldUseWorkerByMode(): boolean {
@@ -161,10 +188,7 @@ export class KuzuAdapter {
     if (this.mode === 'node') {
       return false;
     }
-    if (this.backend === 'wasm') {
-      return true;
-    }
-    if (this.backend === 'auto' && this.nativeFallbackActivated && this.workerClient) {
+    if (this.shouldPreferWasmPath()) {
       return true;
     }
     return false;
@@ -194,9 +218,6 @@ export class KuzuAdapter {
     if (this.backend === 'wasm') {
       throw new Error('Native kuzu backend is disabled by CODEGB_DB_BACKEND=wasm');
     }
-    if (this.backend === 'auto' && this.nativeFallbackActivated) {
-      throw new Error('Native kuzu backend is unavailable after fallback');
-    }
     const runtime = this.loadKuzuRuntime();
     if (runtime) {
       return runtime;
@@ -209,28 +230,35 @@ export class KuzuAdapter {
   }
 
   private activateAutoFallback(reason: unknown): void {
-    if (this.backend !== 'auto' || this.nativeFallbackActivated) {
+    if (this.backend !== 'auto' || this.autoNativeFallbackActivated) {
       return;
     }
-    this.nativeFallbackActivated = true;
+    this.autoNativeFallbackActivated = true;
     if (!hasPrintedAutoFallbackDiagnostic) {
       hasPrintedAutoFallbackDiagnostic = true;
       const detail = reason instanceof Error ? reason.message : String(reason);
       console.warn(
-        `[CodeGB] ${DB_BACKEND_ENV_KEY}=auto: native backend failed, falling back to wasm backend (${detail}).`,
+        `[CodeGB] ${DB_BACKEND_ENV_KEY}=auto: wasm backend failed, falling back to native backend (${detail}).`,
       );
     }
   }
 
   async init(): Promise<void> {
     if (this.getBackendMode() === 'worker') {
-      await this.getWorkerClient().init?.();
-      return;
+      try {
+        await this.getWorkerClient().init?.();
+        return;
+      } catch (error) {
+        if (this.backend !== 'auto') {
+          throw error;
+        }
+        this.activateAutoFallback(error);
+      }
     }
 
     await fs.mkdir(this.storagePath, { recursive: true });
     await fs.writeFile(path.join(this.storagePath, SCHEMA_FILE), `${JAVA_SCHEMA_QUERIES.join('\n\n')}\n`, 'utf8');
-    if (this.backend === 'wasm') {
+    if (this.shouldPreferWasmPath()) {
       return;
     }
 
@@ -252,8 +280,15 @@ export class KuzuAdapter {
 
   async persistGraph(graph: KnowledgeGraph): Promise<void> {
     if (this.getBackendMode() === 'worker') {
-      await this.getWorkerClient().persistGraph(graph);
-      return;
+      try {
+        await this.getWorkerClient().persistGraph(graph);
+        return;
+      } catch (error) {
+        if (this.backend !== 'auto') {
+          throw error;
+        }
+        this.activateAutoFallback(error);
+      }
     }
 
     const payload: PersistedGraph = {
@@ -262,7 +297,7 @@ export class KuzuAdapter {
     };
     await fs.writeFile(path.join(this.storagePath, GRAPH_FILE), JSON.stringify(payload, null, 2), 'utf8');
 
-    if (this.backend === 'wasm') {
+    if (this.shouldPreferWasmPath()) {
       return;
     }
     try {
@@ -288,7 +323,7 @@ export class KuzuAdapter {
         }
 
         for (const node of graph.nodes) {
-          await connection.execute(createSymbol, {
+          const executeResult = await connection.execute(createSymbol, {
             id: node.id,
             label: node.label,
             name: node.properties.name,
@@ -296,6 +331,7 @@ export class KuzuAdapter {
             filePath: node.properties.filePath,
             payload: JSON.stringify(node.properties),
           });
+          this.closeQueryResults(executeResult);
         }
 
         const createRelation = await connection.prepare(
@@ -315,7 +351,7 @@ export class KuzuAdapter {
         }
 
         for (const rel of graph.relationships) {
-          await connection.execute(createRelation, {
+          const executeResult = await connection.execute(createRelation, {
             id: rel.id,
             sourceId: rel.sourceId,
             targetId: rel.targetId,
@@ -324,6 +360,7 @@ export class KuzuAdapter {
             reason: rel.reason,
             line: rel.line ?? null,
           });
+          this.closeQueryResults(executeResult);
         }
       });
     } catch (error) {
@@ -339,11 +376,18 @@ export class KuzuAdapter {
 
   async loadGraph(): Promise<KnowledgeGraph> {
     if (this.getBackendMode() === 'worker') {
-      return this.getWorkerClient().loadGraph();
+      try {
+        return await this.getWorkerClient().loadGraph();
+      } catch (error) {
+        if (this.backend !== 'auto') {
+          throw error;
+        }
+        this.activateAutoFallback(error);
+      }
     }
 
     const graph = createKnowledgeGraph();
-    if (this.backend !== 'wasm') {
+    if (!this.shouldPreferWasmPath()) {
       try {
         const runtime = this.getNativeRuntimeOrThrow();
         await this.withConnection(runtime, async (connection) => {
@@ -432,10 +476,17 @@ export class KuzuAdapter {
 
   async executeCypher(query: string, graph?: KnowledgeGraph): Promise<Array<Record<string, unknown>>> {
     if (this.getBackendMode() === 'worker') {
-      return this.getWorkerClient().executeCypher(query);
+      try {
+        return await this.getWorkerClient().executeCypher(query);
+      } catch (error) {
+        if (this.backend !== 'auto') {
+          throw error;
+        }
+        this.activateAutoFallback(error);
+      }
     }
 
-    if (this.backend !== 'wasm') {
+    if (!this.shouldPreferWasmPath()) {
       try {
         const runtime = this.getNativeRuntimeOrThrow();
         return (await this.withConnection(runtime, async (connection) => this.queryAll(connection, query))) as Array<

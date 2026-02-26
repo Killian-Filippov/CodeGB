@@ -19,7 +19,8 @@
     "test:e2e:phase1:workflow": "tsx --test \"tests/e2e/phase1/complete-workflow.spec.ts\"",
     "test:e2e:phase1:mcp": "tsx --test \"tests/e2e/phase1/mcp-tools.spec.ts\"",
     "test:e2e:phase1:cli": "tsx --test \"tests/e2e/phase1/cli-workflow.spec.ts\"",
-    "build": "pnpm -r build"
+    "build": "pnpm -r build",
+    "benchmark:mcp": "pnpm exec tsx scripts/benchmark-mcp.ts"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
