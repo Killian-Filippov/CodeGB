@@ -46,6 +46,11 @@ type KuzuRuntime = {
   Connection: new (database: KuzuDatabase, numThreads?: number) => KuzuConnection;
 };
 
+type DbBackend = 'auto' | 'native' | 'wasm';
+
+const DB_BACKEND_ENV_KEY = 'CODEGB_DB_BACKEND';
+let hasPrintedAutoFallbackDiagnostic = false;
+
 const tryLoadKuzu = (): KuzuRuntime | null => {
   const candidates = ['kuzu', 'kuzu/kuzu-source/tools/nodejs_api/src_js/index.js'];
   for (const candidate of candidates) {
@@ -82,32 +87,30 @@ export interface KuzuAdapterOptions {
   mode?: KuzuAdapterMode;
   workerClient?: KuzuWorkerClient;
   loadKuzuRuntime?: () => KuzuRuntime | null;
-  enableNativeKuzu?: boolean;
+  dbBackend?: DbBackend;
 }
 
 export class KuzuAdapter {
   private readonly storagePath: string;
   private readonly mode: KuzuAdapterMode;
+  private readonly backend: DbBackend;
   private readonly workerClient?: KuzuWorkerClient;
   private readonly loadKuzuRuntime: () => KuzuRuntime | null;
+  private nativeFallbackActivated = false;
 
   constructor(storagePath: string, options: KuzuAdapterOptions = {}) {
     this.storagePath = storagePath;
     this.mode = options.mode ?? 'auto';
+    this.backend = resolveDbBackend(options.dbBackend);
     this.workerClient = options.workerClient;
-    const nativeEnabled = options.enableNativeKuzu ?? process.env.CODEGB_ENABLE_NATIVE_KUZU === '1';
-    this.loadKuzuRuntime = options.loadKuzuRuntime ?? (nativeEnabled ? tryLoadKuzu : () => null);
+    this.loadKuzuRuntime = options.loadKuzuRuntime ?? (this.backend === 'wasm' ? () => null : tryLoadKuzu);
   }
 
   private get kuzuPath(): string {
     return path.join(this.storagePath, KUZU_DB_FILE);
   }
 
-  private async withConnection<T>(handler: (connection: KuzuConnection) => Promise<T>): Promise<T> {
-    const runtime = this.loadKuzuRuntime();
-    if (!runtime) {
-      throw new Error('Kuzu runtime is not available');
-    }
+  private async withConnection<T>(runtime: KuzuRuntime, handler: (connection: KuzuConnection) => Promise<T>): Promise<T> {
     const db = new runtime.Database(this.kuzuPath);
     const connection = new runtime.Connection(db);
     try {
@@ -151,17 +154,33 @@ export class KuzuAdapter {
     await connection.query('MATCH (n:Symbol) DETACH DELETE n');
   }
 
-  private getBackendMode(): 'worker' | 'node' {
+  private getShouldUseWorkerByMode(): boolean {
     if (this.mode === 'worker') {
+      return true;
+    }
+    if (this.mode === 'node') {
+      return false;
+    }
+    if (this.backend === 'wasm') {
+      return true;
+    }
+    if (this.backend === 'auto' && this.nativeFallbackActivated && this.workerClient) {
+      return true;
+    }
+    return false;
+  }
+
+  private getBackendMode(): 'worker' | 'node' {
+    if (this.getShouldUseWorkerByMode()) {
       if (!this.workerClient) {
-        throw new Error('Worker mode requires a worker client');
+        if (this.mode === 'worker') {
+          throw new Error('Worker mode requires a worker client');
+        }
+        return 'node';
       }
       return 'worker';
     }
-    if (this.mode === 'node') {
-      return 'node';
-    }
-    return this.workerClient ? 'worker' : 'node';
+    return 'node';
   }
 
   private getWorkerClient(): KuzuWorkerClient {
@@ -169,6 +188,38 @@ export class KuzuAdapter {
       throw new Error('Worker mode requires a worker client');
     }
     return this.workerClient;
+  }
+
+  private getNativeRuntimeOrThrow(): KuzuRuntime {
+    if (this.backend === 'wasm') {
+      throw new Error('Native kuzu backend is disabled by CODEGB_DB_BACKEND=wasm');
+    }
+    if (this.backend === 'auto' && this.nativeFallbackActivated) {
+      throw new Error('Native kuzu backend is unavailable after fallback');
+    }
+    const runtime = this.loadKuzuRuntime();
+    if (runtime) {
+      return runtime;
+    }
+    if (this.backend === 'native') {
+      throw new Error('Native kuzu backend is unavailable');
+    }
+    this.activateAutoFallback('native runtime is unavailable');
+    throw new Error('Native kuzu backend is unavailable');
+  }
+
+  private activateAutoFallback(reason: unknown): void {
+    if (this.backend !== 'auto' || this.nativeFallbackActivated) {
+      return;
+    }
+    this.nativeFallbackActivated = true;
+    if (!hasPrintedAutoFallbackDiagnostic) {
+      hasPrintedAutoFallbackDiagnostic = true;
+      const detail = reason instanceof Error ? reason.message : String(reason);
+      console.warn(
+        `[CodeGB] ${DB_BACKEND_ENV_KEY}=auto: native backend failed, falling back to wasm backend (${detail}).`,
+      );
+    }
   }
 
   async init(): Promise<void> {
@@ -179,10 +230,23 @@ export class KuzuAdapter {
 
     await fs.mkdir(this.storagePath, { recursive: true });
     await fs.writeFile(path.join(this.storagePath, SCHEMA_FILE), `${JAVA_SCHEMA_QUERIES.join('\n\n')}\n`, 'utf8');
-    if (this.loadKuzuRuntime()) {
-      await this.withConnection(async (connection) => {
+    if (this.backend === 'wasm') {
+      return;
+    }
+
+    try {
+      const runtime = this.getNativeRuntimeOrThrow();
+      await this.withConnection(runtime, async (connection) => {
         await this.ensureSchema(connection);
       });
+    } catch (error) {
+      if (this.backend !== 'auto') {
+        throw error;
+      }
+      this.activateAutoFallback(error);
+      if (this.getBackendMode() === 'worker') {
+        await this.getWorkerClient().init?.();
+      }
     }
   }
 
@@ -198,15 +262,17 @@ export class KuzuAdapter {
     };
     await fs.writeFile(path.join(this.storagePath, GRAPH_FILE), JSON.stringify(payload, null, 2), 'utf8');
 
-    if (!this.loadKuzuRuntime()) {
+    if (this.backend === 'wasm') {
       return;
     }
-    await this.withConnection(async (connection) => {
-      await this.ensureSchema(connection);
-      await this.clearGraph(connection);
+    try {
+      const runtime = this.getNativeRuntimeOrThrow();
+      await this.withConnection(runtime, async (connection) => {
+        await this.ensureSchema(connection);
+        await this.clearGraph(connection);
 
-      const createSymbol = await connection.prepare(
-        `
+        const createSymbol = await connection.prepare(
+          `
           CREATE (s:Symbol {
             id: $id,
             label: $label,
@@ -216,24 +282,24 @@ export class KuzuAdapter {
             payload: $payload
           })
         `,
-      );
-      if (!createSymbol.isSuccess()) {
-        throw new Error(createSymbol.getErrorMessage());
-      }
+        );
+        if (!createSymbol.isSuccess()) {
+          throw new Error(createSymbol.getErrorMessage());
+        }
 
-      for (const node of graph.nodes) {
-        await connection.execute(createSymbol, {
-          id: node.id,
-          label: node.label,
-          name: node.properties.name,
-          qualifiedName: node.properties.qualifiedName ?? '',
-          filePath: node.properties.filePath,
-          payload: JSON.stringify(node.properties),
-        });
-      }
+        for (const node of graph.nodes) {
+          await connection.execute(createSymbol, {
+            id: node.id,
+            label: node.label,
+            name: node.properties.name,
+            qualifiedName: node.properties.qualifiedName ?? '',
+            filePath: node.properties.filePath,
+            payload: JSON.stringify(node.properties),
+          });
+        }
 
-      const createRelation = await connection.prepare(
-        `
+        const createRelation = await connection.prepare(
+          `
           MATCH (source:Symbol {id: $sourceId}), (target:Symbol {id: $targetId})
           CREATE (source)-[:CodeRelation {
             id: $id,
@@ -243,23 +309,32 @@ export class KuzuAdapter {
             line: $line
           }]->(target)
         `,
-      );
-      if (!createRelation.isSuccess()) {
-        throw new Error(createRelation.getErrorMessage());
-      }
+        );
+        if (!createRelation.isSuccess()) {
+          throw new Error(createRelation.getErrorMessage());
+        }
 
-      for (const rel of graph.relationships) {
-        await connection.execute(createRelation, {
-          id: rel.id,
-          sourceId: rel.sourceId,
-          targetId: rel.targetId,
-          type: rel.type,
-          confidence: rel.confidence,
-          reason: rel.reason,
-          line: rel.line ?? null,
-        });
+        for (const rel of graph.relationships) {
+          await connection.execute(createRelation, {
+            id: rel.id,
+            sourceId: rel.sourceId,
+            targetId: rel.targetId,
+            type: rel.type,
+            confidence: rel.confidence,
+            reason: rel.reason,
+            line: rel.line ?? null,
+          });
+        }
+      });
+    } catch (error) {
+      if (this.backend !== 'auto') {
+        throw error;
       }
-    });
+      this.activateAutoFallback(error);
+      if (this.getBackendMode() === 'worker') {
+        await this.getWorkerClient().persistGraph(graph);
+      }
+    }
   }
 
   async loadGraph(): Promise<KnowledgeGraph> {
@@ -268,30 +343,32 @@ export class KuzuAdapter {
     }
 
     const graph = createKnowledgeGraph();
-    try {
-      await this.withConnection(async (connection) => {
-        await this.ensureSchema(connection);
+    if (this.backend !== 'wasm') {
+      try {
+        const runtime = this.getNativeRuntimeOrThrow();
+        await this.withConnection(runtime, async (connection) => {
+          await this.ensureSchema(connection);
 
-        const nodeRows = await this.queryAll(connection, 'MATCH (s:Symbol) RETURN s');
-        for (const row of nodeRows) {
-          const raw = row.s as Record<string, unknown> | undefined;
-          if (!raw) {
-            continue;
+          const nodeRows = await this.queryAll(connection, 'MATCH (s:Symbol) RETURN s');
+          for (const row of nodeRows) {
+            const raw = row.s as Record<string, unknown> | undefined;
+            if (!raw) {
+              continue;
+            }
+            const parsedProps =
+              typeof raw.payload === 'string'
+                ? (JSON.parse(raw.payload) as JavaGraphNode['properties'])
+                : ({ name: String(raw.name ?? ''), filePath: String(raw.filePath ?? '') } as JavaGraphNode['properties']);
+            graph.addNode({
+              id: String(raw.id),
+              label: String(raw.label) as JavaGraphNode['label'],
+              properties: parsedProps,
+            });
           }
-          const parsedProps =
-            typeof raw.payload === 'string'
-              ? (JSON.parse(raw.payload) as JavaGraphNode['properties'])
-              : ({ name: String(raw.name ?? ''), filePath: String(raw.filePath ?? '') } as JavaGraphNode['properties']);
-          graph.addNode({
-            id: String(raw.id),
-            label: String(raw.label) as JavaGraphNode['label'],
-            properties: parsedProps,
-          });
-        }
 
-        const relRows = await this.queryAll(
-          connection,
-          `
+          const relRows = await this.queryAll(
+            connection,
+            `
             MATCH (source:Symbol)-[r:CodeRelation]->(target:Symbol)
             RETURN
               source.id as sourceId,
@@ -302,24 +379,32 @@ export class KuzuAdapter {
               r.reason as reason,
               r.line as line
           `,
-        );
-        for (const row of relRows) {
-          graph.addRelationship({
-            id: String(row.id),
-            sourceId: String(row.sourceId),
-            targetId: String(row.targetId),
-            type: String(row.type) as JavaGraphRelationship['type'],
-            confidence: Number(row.confidence ?? 1),
-            reason: String(row.reason ?? ''),
-            line: typeof row.line === 'number' ? row.line : undefined,
-          });
+          );
+          for (const row of relRows) {
+            graph.addRelationship({
+              id: String(row.id),
+              sourceId: String(row.sourceId),
+              targetId: String(row.targetId),
+              type: String(row.type) as JavaGraphRelationship['type'],
+              confidence: Number(row.confidence ?? 1),
+              reason: String(row.reason ?? ''),
+              line: typeof row.line === 'number' ? row.line : undefined,
+            });
+          }
+        });
+        if (graph.nodeCount > 0 || graph.relationshipCount > 0) {
+          return graph;
         }
-      });
-      if (graph.nodeCount > 0 || graph.relationshipCount > 0) {
-        return graph;
+      } catch (error) {
+        if (this.backend === 'native') {
+          throw error;
+        }
+        this.activateAutoFallback(error);
+        if (this.getBackendMode() === 'worker') {
+          return this.getWorkerClient().loadGraph();
+        }
+        // Fall through to JSON fallback for backward compatibility.
       }
-    } catch {
-      // Fall through to JSON fallback for backward compatibility.
     }
 
     const content = await fs.readFile(path.join(this.storagePath, GRAPH_FILE), 'utf8');
@@ -350,14 +435,25 @@ export class KuzuAdapter {
       return this.getWorkerClient().executeCypher(query);
     }
 
-    try {
-      return (await this.withConnection(async (connection) => this.queryAll(connection, query))) as Array<
-        Record<string, unknown>
-      >;
-    } catch {
-      const activeGraph = graph ?? (await this.loadGraph());
-      return executeCypherInMemory(activeGraph, query);
+    if (this.backend !== 'wasm') {
+      try {
+        const runtime = this.getNativeRuntimeOrThrow();
+        return (await this.withConnection(runtime, async (connection) => this.queryAll(connection, query))) as Array<
+          Record<string, unknown>
+        >;
+      } catch (error) {
+        if (this.backend === 'native') {
+          throw error;
+        }
+        this.activateAutoFallback(error);
+        if (this.getBackendMode() === 'worker') {
+          return this.getWorkerClient().executeCypher(query);
+        }
+      }
     }
+
+    const activeGraph = graph ?? (await this.loadGraph());
+    return executeCypherInMemory(activeGraph, query);
   }
 
   async close(): Promise<void> {
@@ -366,6 +462,14 @@ export class KuzuAdapter {
     }
   }
 }
+
+const resolveDbBackend = (value: string | undefined): DbBackend => {
+  const normalized = (value ?? process.env[DB_BACKEND_ENV_KEY] ?? 'wasm').trim().toLowerCase();
+  if (normalized === 'native' || normalized === 'wasm' || normalized === 'auto') {
+    return normalized;
+  }
+  return 'auto';
+};
 
 const extractLimit = (query: string): number => {
   const match = query.match(/LIMIT\s+(\d+)/i);

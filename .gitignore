@@ -3,3 +3,5 @@ node_modules/
 coverage/
 .javakg/
 .DS_Store
+*.md
+!/README.md
