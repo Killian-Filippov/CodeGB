@@ -54,6 +54,99 @@ JAVA_KG_DB_PATH=.javakg pnpm exec tsx packages/mcp-server/src/cli.ts
 - 该进程通过 stdio 与 MCP Client 通信。
 - MCP Client 里将此命令配置为 MCP Server 启动命令即可。
 
+## MCP Client 配置模板（最小可用）
+
+下面的模板统一使用：
+- `command`: `pnpm`
+- `args`: `["exec", "tsx", "packages/mcp-server/src/cli.ts"]`
+- `env.JAVA_KG_DB_PATH`: 你的索引目录（需与 `--storage` 一致）
+
+请将 `"/ABS/PATH/TO/vibe-coding-plugin"` 和 `"/ABS/PATH/TO/.javakg"` 替换成绝对路径。
+
+### Claude Desktop
+
+配置文件（macOS）通常在 `~/Library/Application Support/Claude/claude_desktop_config.json`：
+
+```json
+{
+  "mcpServers": {
+    "codegb": {
+      "command": "pnpm",
+      "args": ["exec", "tsx", "packages/mcp-server/src/cli.ts"],
+      "cwd": "/ABS/PATH/TO/vibe-coding-plugin",
+      "env": {
+        "JAVA_KG_DB_PATH": "/ABS/PATH/TO/.javakg"
+      }
+    }
+  }
+}
+```
+
+### Cursor
+
+工作区文件 `.cursor/mcp.json`：
+
+```json
+{
+  "mcpServers": {
+    "codegb": {
+      "command": "pnpm",
+      "args": ["exec", "tsx", "packages/mcp-server/src/cli.ts"],
+      "cwd": "/ABS/PATH/TO/vibe-coding-plugin",
+      "env": {
+        "JAVA_KG_DB_PATH": "/ABS/PATH/TO/.javakg"
+      }
+    }
+  }
+}
+```
+
+### VS Code
+
+工作区文件 `.vscode/mcp.json`：
+
+```json
+{
+  "servers": {
+    "codegb": {
+      "type": "stdio",
+      "command": "pnpm",
+      "args": ["exec", "tsx", "packages/mcp-server/src/cli.ts"],
+      "cwd": "/ABS/PATH/TO/vibe-coding-plugin",
+      "env": {
+        "JAVA_KG_DB_PATH": "/ABS/PATH/TO/.javakg"
+      }
+    }
+  }
+}
+```
+
+## 首次索引（MCP 前置）
+
+MCP 只提供查询，首次必须先做 `init + index`：
+
+```bash
+pnpm exec tsx packages/cli/src/index.ts init /ABS/PATH/TO/REPO --storage /ABS/PATH/TO/.javakg
+pnpm exec tsx packages/cli/src/index.ts index /ABS/PATH/TO/REPO --storage /ABS/PATH/TO/.javakg
+```
+
+## 常见问题（FAQ）
+
+- Q: 能连上 MCP，但结果为空？
+  A: 通常是未完成首次索引，或 `JAVA_KG_DB_PATH` 与索引 `--storage` 不一致。
+- Q: 启动失败并输出 JSON 错误码？
+  A: `E_NODE_VERSION`（Node < 18）、`E_STORAGE_PERM`（目录不可写）、`E_WORKER_UNAVAILABLE`（Worker 不可用）、`E_BACKEND_INIT`（后端初始化失败）。
+- Q: 报 `pnpm` 找不到？
+  A: 确保客户端运行环境 `PATH` 可找到 `pnpm`，或改用 `pnpm` 绝对路径。
+- Q: `list_repos` 显示旧仓库？
+  A: 对新仓库重新执行 `init + index`，并更新 `JAVA_KG_DB_PATH`。
+
+## 降级行为
+
+- 后端降级：`CODEGB_DB_BACKEND=auto` 时，优先 `wasm`，失败自动回退到 `native`，并打印一次性诊断日志。
+- Cypher 降级：`cypher` 工具优先走后端；后端不可用或返回不兼容结果时，自动回退到内存图兼容执行路径。
+- 数据降级：若索引目录为空或图加载失败，服务以空图启动，工具返回空结果而非进程崩溃。
+
 ## 图数据库后端选择
 
 当前实现支持两条路径：
@@ -85,6 +178,4 @@ pnpm test:e2e
 - `packages/cli`: 本地初始化/索引/查询命令
 - `tests/e2e`: 端到端测试
 
-## 设计文档
 
-- `架构设计.md`
