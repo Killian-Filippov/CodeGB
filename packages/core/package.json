@@ -1,0 +1,22 @@
+{
+  "name": "@codegb/core",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "type-check": "tsc --noEmit",
+    "build": "tsc && pnpm exec -- swc packages/core/src -d packages/core/dist --source-maps",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@swc/cli": "^0.8.0",
+    "@swc/core": "^1.7.0"
+  },
+  "dependencies": {
+    "kuzu": "^0.11.0",
+    "tree-sitter": "^0.21.0",
+    "tree-sitter-java": "^0.21.0"
+  }
+}

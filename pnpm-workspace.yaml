@@ -1,0 +1,9 @@
+packages:
+  - packages/*
+
+ignoredBuiltDependencies:
+  - '@swc/core'
+  - esbuild
+  - kuzu
+  - tree-sitter
+  - tree-sitter-java

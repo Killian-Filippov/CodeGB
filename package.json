@@ -1,0 +1,30 @@
+{
+  "name": "codegb",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "tsx --test \"packages/*/test/**/*.test.ts\"",
+    "test:core": "tsx --test \"packages/core/test/**/*.test.ts\"",
+    "test:cli": "tsx --test \"packages/cli/test/**/*.test.ts\"",
+    "test:e2e": "tsx --test \"tests/e2e/**/*.spec.ts\"",
+    "test:e2e:mcp": "tsx --test \"tests/e2e/mcp-server/**/*.spec.ts\"",
+    "test:e2e:pipeline": "tsx --test \"tests/e2e/ingestion-pipeline/**/*.spec.ts\"",
+    "test:e2e:search": "tsx --test \"tests/e2e/knowledge-graph/**/*.spec.ts\"",
+    "test:e2e:cli": "tsx --test \"tests/e2e/cli/**/*.spec.ts\"",
+    "test:e2e:phase1": "tsx --test \"tests/e2e/phase1/**/*.spec.ts\"",
+    "test:e2e:phase1:workflow": "tsx --test \"tests/e2e/phase1/complete-workflow.spec.ts\"",
+    "test:e2e:phase1:mcp": "tsx --test \"tests/e2e/phase1/mcp-tools.spec.ts\"",
+    "test:e2e:phase1:cli": "tsx --test \"tests/e2e/phase1/cli-workflow.spec.ts\"",
+    "build": "pnpm -r build"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@types/node": "^20.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.4.0"
+  }
+}

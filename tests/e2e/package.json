@@ -1,0 +1,19 @@
+{
+  "name": "codegb-e2e-tests",
+  "version": "1.0.0",
+  "description": "E2E tests for CodeGB - Phase 1",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "test:e2e": "node --test tests/e2e/**/*.spec.ts",
+    "test:e2e:mcp": "node --test tests/e2e/mcp-server/**/*.spec.ts",
+    "test:e2e:pipeline": "node --test tests/e2e/ingestion-pipeline/**/*.spec.ts",
+    "test:e2e:search": "node --test tests/e2e/knowledge-graph/**/*.spec.ts",
+    "test:e2e:cli": "node --test tests/e2e/cli/**/*.spec.ts",
+    "test:watch": "node --test --watch",
+    "test:coverage": "node --experimental-test-coverage --test tests/e2e/**/*.spec.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0"
+  }
+}
