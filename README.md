@@ -40,6 +40,9 @@ pnpm exec tsx packages/cli/src/index.ts init /path/to/your/repo --storage .javak
 # 2) 建索引
 pnpm exec tsx packages/cli/src/index.ts index /path/to/your/repo --storage .javakg
 
+# 2.1) 增量建索引（仅处理 git diff 变更的 Java 文件）
+pnpm exec tsx packages/cli/src/index.ts index /path/to/your/repo --storage .javakg --changed-files
+
 # 3) 查询
 pnpm exec tsx packages/cli/src/index.ts query "payment" --storage .javakg --limit 10
 ```
@@ -60,6 +63,7 @@ JAVA_KG_DB_PATH=.javakg pnpm exec tsx packages/mcp-server/src/cli.ts
 - `command`: `pnpm`
 - `args`: `["exec", "tsx", "packages/mcp-server/src/cli.ts"]`
 - `env.JAVA_KG_DB_PATH`: 你的索引目录（需与 `--storage` 一致）
+- `env.CODEGB_AUTO_INDEX_INTERVAL_MS`: MCP 后台自动增量索引轮询间隔（毫秒，默认 `3000`，设为 `0` 可关闭）
 
 请将 `"/ABS/PATH/TO/vibe-coding-plugin"` 和 `"/ABS/PATH/TO/.javakg"` 替换成绝对路径。
 
@@ -177,5 +181,3 @@ pnpm test:e2e
 - `packages/mcp-server`: MCP Server 启动与协议对接
 - `packages/cli`: 本地初始化/索引/查询命令
 - `tests/e2e`: 端到端测试
-
-

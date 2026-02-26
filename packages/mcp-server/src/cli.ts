@@ -7,6 +7,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 
 import { traverseImpact } from '../../core/src/graph/traversal';
 import { createKnowledgeGraph } from '../../core/src/graph/graph';
+import { collectChangedJavaFiles } from '../../core/src/ingestion/git-changed-files';
+import { runPipelineFromRepo } from '../../core/src/ingestion/pipeline';
 import { searchByKeyword } from '../../core/src/search/keyword-search';
 import { executeCypherInMemory, KuzuAdapter } from '../../core/src/storage/kuzu-adapter';
 import type { JavaGraphNode, KnowledgeGraph } from '../../core/src/types/graph';
@@ -122,6 +124,70 @@ const readRepoConfig = async (storagePath: string): Promise<{ repoName: string; 
       repoPath: process.cwd(),
     };
   }
+};
+
+const AUTO_INDEX_INTERVAL_ENV_KEY = 'CODEGB_AUTO_INDEX_INTERVAL_MS';
+const DEFAULT_AUTO_INDEX_INTERVAL_MS = 3000;
+
+const resolveAutoIndexIntervalMs = (): number => {
+  const raw = process.env[AUTO_INDEX_INTERVAL_ENV_KEY];
+  if (!raw) {
+    return DEFAULT_AUTO_INDEX_INTERVAL_MS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return Math.max(1000, Math.floor(parsed));
+};
+
+const startAutoIncrementalIndexing = (options: {
+  storagePath: string;
+  repoPath: string;
+  repoName: string;
+  intervalMs: number;
+}): void => {
+  const { storagePath, repoPath, repoName, intervalMs } = options;
+  let running = false;
+  let disabled = false;
+
+  const runOnce = async (): Promise<void> => {
+    if (running || disabled) {
+      return;
+    }
+    running = true;
+    try {
+      const changedFiles = await collectChangedJavaFiles(repoPath);
+      if (changedFiles.filesToInvalidate.length === 0) {
+        return;
+      }
+
+      const result = await runPipelineFromRepo({
+        repoPath,
+        storagePath,
+        projectName: repoName,
+        includeFilePaths: changedFiles.filesToIndex,
+        changedFilePaths: changedFiles.filesToInvalidate,
+        incremental: true,
+      });
+      process.stderr.write(`[CodeGB] auto incremental index updated (${result.filesIndexed} files).\n`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`[CodeGB] auto incremental index failed: ${message}\n`);
+      if (/requires a git repository|not a git repository/i.test(message)) {
+        disabled = true;
+        process.stderr.write('[CodeGB] auto incremental index is disabled for non-git workspace.\n');
+      }
+    } finally {
+      running = false;
+    }
+  };
+
+  void runOnce();
+  const timer = setInterval(() => {
+    void runOnce();
+  }, intervalMs);
+  timer.unref?.();
 };
 
 const runCypherFallback = (query: string, graph: KnowledgeGraph): Array<Record<string, unknown>> => {
@@ -545,7 +611,16 @@ const main = async (): Promise<void> => {
     throw new Error(`Unknown tool: ${name}`);
   });
 
-  await readRepoConfig(storagePath);
+  const repoConfig = await readRepoConfig(storagePath);
+  const autoIndexIntervalMs = resolveAutoIndexIntervalMs();
+  if (autoIndexIntervalMs > 0) {
+    startAutoIncrementalIndexing({
+      storagePath,
+      repoPath: repoConfig.repoPath,
+      repoName: repoConfig.repoName,
+      intervalMs: autoIndexIntervalMs,
+    });
+  }
 
   await server.connect(new StdioServerTransport());
 };

@@ -33,6 +33,8 @@ const resolveStoragePath = (args: string[]): string => {
   return path.resolve(fromOption ?? DEFAULT_STORAGE);
 };
 
+const hasFlag = (args: string[], name: string): boolean => args.includes(name);
+
 const runCliStartupChecks = async (storagePath: string): Promise<void> => {
   const adapter = new KuzuAdapter(storagePath);
   await runStartupChecks({
@@ -80,8 +82,9 @@ export const runCli = async (argv: string[]): Promise<CliResult> => {
     if (command === 'index') {
       const repoPath = rest[0]?.startsWith('--') ? undefined : rest[0];
       const storagePath = resolveStoragePath(rest);
+      const changedFiles = hasFlag(rest, '--changed-files');
       await runCliStartupChecks(storagePath);
-      const stdout = await runIndexCommand({ repoPath, storagePath });
+      const stdout = await runIndexCommand({ repoPath, storagePath, changedFiles });
       return { exitCode: 0, stdout, stderr: '' };
     }
 

@@ -28,6 +28,7 @@ export {
   installKuzuWorker,
 } from './storage/kuzu-worker';
 export * from './ingestion/pipeline';
+export * from './ingestion/git-changed-files';
 export * from './search/keyword-search';
 export * from './search/context-builder';
 export * from './mcp/tools';
