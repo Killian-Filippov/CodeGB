@@ -231,20 +231,24 @@ export const createKuzuWasmWorkerBackend = async (
     }
   };
 
+  const ensureInitialized = async (): Promise<void> => {
+    if (initialized) {
+      return;
+    }
+    database = new kuzu.Database(databasePath);
+    connection = new kuzu.Connection(database);
+    await database.init();
+    await connection.init();
+    await ensureSchema();
+    initialized = true;
+  };
+
   return {
     async init() {
-      if (initialized) {
-        return;
-      }
-      database = new kuzu.Database(databasePath);
-      connection = new kuzu.Connection(database);
-      await database.init();
-      await connection.init();
-      await ensureSchema();
-      initialized = true;
+      await ensureInitialized();
     },
     async persistGraph(graph) {
-      await this.init();
+      await ensureInitialized();
       const activeConnection = getConnection();
       const clearResult = await activeConnection.query('MATCH (n:Symbol) DETACH DELETE n');
       await closeResult(clearResult);
@@ -312,7 +316,7 @@ export const createKuzuWasmWorkerBackend = async (
       await syncToPersistentStorage();
     },
     async loadGraph() {
-      await this.init();
+      await ensureInitialized();
       const activeConnection = getConnection();
 
       const nodesResult = await activeConnection.query('MATCH (s:Symbol) RETURN s');
@@ -368,7 +372,7 @@ export const createKuzuWasmWorkerBackend = async (
       };
     },
     async executeCypher(query) {
-      await this.init();
+      await ensureInitialized();
       const result = await getConnection().query(query);
       const rows = await resultToRows(result);
       await closeResult(result);

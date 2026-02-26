@@ -6,8 +6,27 @@ export * from './parser/parser-loader';
 export * from './parser/ast-extractor';
 export * from './storage/schema';
 export * from './storage/kuzu-adapter';
-export * from './storage/web-worker-kuzu-client';
-export * from './storage/kuzu-worker';
+export type {
+  WorkerLike,
+  WebWorkerKuzuClientOptions,
+  WorkerAction as WebWorkerAction,
+} from './storage/web-worker-kuzu-client';
+export { WebWorkerKuzuClient } from './storage/web-worker-kuzu-client';
+export type {
+  WorkerAction as KuzuWorkerAction,
+  WorkerRequestMessage,
+  WorkerResponseMessage,
+  WorkerMessageEventLike,
+  WorkerHostLike,
+  KuzuWorkerBackend,
+  KuzuWasmModule,
+  KuzuWasmWorkerBackendOptions,
+} from './storage/kuzu-worker';
+export {
+  createInMemoryKuzuWorkerBackend,
+  createKuzuWasmWorkerBackend,
+  installKuzuWorker,
+} from './storage/kuzu-worker';
 export * from './ingestion/pipeline';
 export * from './search/keyword-search';
 export * from './search/context-builder';

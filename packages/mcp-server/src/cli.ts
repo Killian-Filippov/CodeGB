@@ -8,8 +8,92 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { traverseImpact } from '../../core/src/graph/traversal';
 import { createKnowledgeGraph } from '../../core/src/graph/graph';
 import { searchByKeyword } from '../../core/src/search/keyword-search';
-import { KuzuAdapter } from '../../core/src/storage/kuzu-adapter';
+import { executeCypherInMemory, KuzuAdapter } from '../../core/src/storage/kuzu-adapter';
 import type { JavaGraphNode, KnowledgeGraph } from '../../core/src/types/graph';
+
+const MIN_NODE_MAJOR = 18;
+type StartupErrorCode = 'E_NODE_VERSION' | 'E_STORAGE_PERM' | 'E_WORKER_UNAVAILABLE' | 'E_BACKEND_INIT' | 'E_INTERNAL';
+
+class StartupError extends Error {
+  readonly code: StartupErrorCode;
+
+  constructor(code: StartupErrorCode, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+const toStartupError = (error: unknown): StartupError => {
+  if (error instanceof StartupError) {
+    return error;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  const maybeSystem = error as Partial<{ code: string }>;
+  if (maybeSystem.code === 'EACCES' || maybeSystem.code === 'EPERM' || maybeSystem.code === 'EROFS') {
+    return new StartupError('E_STORAGE_PERM', 'Storage directory is not writable.');
+  }
+  return new StartupError('E_INTERNAL', message || 'Unexpected startup error.');
+};
+
+const renderStartupError = (error: unknown): string =>
+  JSON.stringify({
+    code: toStartupError(error).code,
+    message: toStartupError(error).message,
+  });
+
+const ensureNodeVersion = (): void => {
+  const major = Number(process.versions.node.split('.')[0] ?? 0);
+  if (!Number.isFinite(major) || major < MIN_NODE_MAJOR) {
+    throw new StartupError(
+      'E_NODE_VERSION',
+      `Node.js ${MIN_NODE_MAJOR}+ is required (current: ${process.versions.node}).`,
+    );
+  }
+};
+
+const ensureStorageWritable = async (storagePath: string): Promise<void> => {
+  try {
+    await fs.mkdir(storagePath, { recursive: true });
+    const probePath = path.join(storagePath, `.codegb-write-check-${process.pid}-${Date.now()}.tmp`);
+    await fs.writeFile(probePath, 'ok', 'utf8');
+    await fs.unlink(probePath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new StartupError('E_STORAGE_PERM', `Storage directory is not writable: ${storagePath}. ${message}`);
+  }
+};
+
+const ensureWorkerAvailable = async (): Promise<void> => {
+  const hasGlobalWorker = typeof (globalThis as { Worker?: unknown }).Worker === 'function';
+  if (hasGlobalWorker) {
+    return;
+  }
+  try {
+    const workerThreads = await import('node:worker_threads');
+    if (typeof workerThreads.Worker === 'function') {
+      return;
+    }
+  } catch {
+    // Fall through to startup error.
+  }
+  throw new StartupError('E_WORKER_UNAVAILABLE', 'Worker runtime is unavailable in current environment.');
+};
+
+const ensureBackendInitialized = async (adapter: KuzuAdapter): Promise<void> => {
+  try {
+    await adapter.init();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new StartupError('E_BACKEND_INIT', `Backend initialization failed. ${message}`);
+  }
+};
+
+const runStartupChecks = async (storagePath: string, adapter: KuzuAdapter): Promise<void> => {
+  ensureNodeVersion();
+  await ensureStorageWritable(storagePath);
+  await ensureWorkerAvailable();
+  await ensureBackendInitialized(adapter);
+};
 
 const toSymbol = (node: JavaGraphNode) => ({
   id: node.id,
@@ -19,7 +103,7 @@ const toSymbol = (node: JavaGraphNode) => ({
   file: node.properties.filePath,
   returnType: node.properties.returnType,
   parameters: node.properties.parameters,
-  fieldType: node.properties.fieldType,
+  fieldType: node.properties.type,
 });
 
 const readRepoConfig = async (storagePath: string): Promise<{ repoName: string; repoPath: string }> => {
@@ -40,9 +124,10 @@ const readRepoConfig = async (storagePath: string): Promise<{ repoName: string; 
   }
 };
 
-const runCypher = (query: string, graph: KnowledgeGraph): Array<Record<string, unknown>> => {
+const runCypherFallback = (query: string, graph: KnowledgeGraph): Array<Record<string, unknown>> => {
   const q = query.replace(/\s+/g, ' ').trim();
 
+  // Minimal backward compatibility fallback for common legacy client queries.
   const countAll = q.match(/^MATCH \(n\) RETURN count\(n\) as count$/i);
   if (countAll) {
     return [{ count: graph.nodes.length }];
@@ -113,6 +198,31 @@ const runCypher = (query: string, graph: KnowledgeGraph): Array<Record<string, u
         rel: rel.type,
         to: target.properties.name,
         targetType: target.label,
+      });
+      if (rows.length >= limit) {
+        break;
+      }
+    }
+    return rows;
+  }
+
+  if (
+    /^MATCH \(c1:Class\)-\[r\]->\(c2:Class\) RETURN c1\.name as from, type\(r\) as rel, c2\.name as to LIMIT \d+$/i.test(
+      q,
+    )
+  ) {
+    const limit = Number(q.match(/LIMIT (\d+)/i)?.[1] ?? 10);
+    const rows: Array<Record<string, unknown>> = [];
+    for (const rel of graph.relationships) {
+      const source = graph.getNode(rel.sourceId);
+      const target = graph.getNode(rel.targetId);
+      if (!source || !target || source.label !== 'Class' || target.label !== 'Class') {
+        continue;
+      }
+      rows.push({
+        from: source.properties.name,
+        rel: rel.type,
+        to: target.properties.name,
       });
       if (rows.length >= limit) {
         break;
@@ -214,12 +324,29 @@ const runCypher = (query: string, graph: KnowledgeGraph): Array<Record<string, u
     return [];
   }
 
-  throw new Error(`Unsupported Cypher query in Phase 1 server: ${query}`);
+  return executeCypherInMemory(graph, query);
+};
+
+const shouldFallbackOnLegacyShape = (query: string, rows: Array<Record<string, unknown>>): boolean => {
+  const q = query.replace(/\s+/g, ' ').trim();
+  if (
+    /^MATCH \(c:Class\)-\[:CONTAINS\]->\(m:Method\) RETURN c\.name as className, count\(m\) as methodCount ORDER BY methodCount DESC$/i.test(
+      q,
+    )
+  ) {
+    if (rows.length === 0) {
+      return false;
+    }
+    const first = rows[0] ?? {};
+    return typeof first['className'] !== 'string' || typeof first['methodCount'] !== 'number';
+  }
+  return false;
 };
 
 const main = async (): Promise<void> => {
   const storagePath = process.env.JAVA_KG_DB_PATH ?? path.resolve('.javakg');
   const adapter = new KuzuAdapter(storagePath);
+  await runStartupChecks(storagePath, adapter);
 
   const safeLoadGraph = async (): Promise<KnowledgeGraph> => {
     try {
@@ -346,7 +473,7 @@ const main = async (): Promise<void> => {
         .filter((r) => r.sourceId === symbolNode.id && r.type === 'CONTAINS')
         .map((r) => graph.getNode(r.targetId))
         .filter((n): n is JavaGraphNode => !!n && n.label === 'Field')
-        .map((n) => ({ ...toSymbol(n), type: n.label, fieldType: n.properties.fieldType }));
+        .map((n) => ({ ...toSymbol(n), type: n.label, fieldType: n.properties.type }));
 
       const calls = includeCalls
         ? graph.relationships
@@ -400,7 +527,18 @@ const main = async (): Promise<void> => {
 
     if (name === 'cypher') {
       const query = String(args.query ?? '').trim();
-      const results = runCypher(query, graph);
+      let results: Array<Record<string, unknown>>;
+      try {
+        results = await adapter.executeCypher(query);
+        if (shouldFallbackOnLegacyShape(query, results)) {
+          const latestGraph = await safeLoadGraph();
+          results = runCypherFallback(query, latestGraph);
+        }
+      } catch {
+        // Fallback only when backend path is unrecoverable.
+        const latestGraph = await safeLoadGraph();
+        results = runCypherFallback(query, latestGraph);
+      }
       return { content: [{ type: 'text', text: JSON.stringify({ results }) }] };
     }
 
@@ -413,6 +551,6 @@ const main = async (): Promise<void> => {
 };
 
 main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+  process.stderr.write(`${renderStartupError(error)}\n`);
   process.exit(1);
 });
