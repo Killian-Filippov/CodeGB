@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 
 import { createKnowledgeGraph } from '../graph/graph';
@@ -12,6 +13,50 @@ import { JAVA_SCHEMA_QUERIES } from './schema';
 const GRAPH_FILE = 'graph.json';
 const SCHEMA_FILE = 'schema.sql';
 const REPOS_FILE = 'repos.json';
+const KUZU_DB_FILE = 'kuzu.db';
+const require = createRequire(import.meta.url);
+
+type KuzuQueryResult = {
+  getAll: () => Promise<Array<Record<string, unknown>>>;
+};
+
+type KuzuPreparedStatement = {
+  isSuccess: () => boolean;
+  getErrorMessage: () => string;
+};
+
+type KuzuConnection = {
+  init: () => Promise<void>;
+  close: () => Promise<void>;
+  query: (statement: string) => Promise<KuzuQueryResult | KuzuQueryResult[]>;
+  prepare: (statement: string) => Promise<KuzuPreparedStatement>;
+  execute: (
+    prepared: KuzuPreparedStatement,
+    params?: Record<string, unknown>,
+  ) => Promise<KuzuQueryResult | KuzuQueryResult[]>;
+};
+
+type KuzuDatabase = {
+  init: () => Promise<void>;
+  close: () => Promise<void>;
+};
+
+type KuzuRuntime = {
+  Database: new (databasePath?: string) => KuzuDatabase;
+  Connection: new (database: KuzuDatabase, numThreads?: number) => KuzuConnection;
+};
+
+const tryLoadKuzu = (): KuzuRuntime | null => {
+  const candidates = ['kuzu', 'kuzu/kuzu-source/tools/nodejs_api/src_js/index.js'];
+  for (const candidate of candidates) {
+    try {
+      return require(candidate) as KuzuRuntime;
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return null;
+};
 
 export interface RepoRecord {
   name: string;
@@ -23,28 +68,260 @@ export interface PersistedGraph {
   relationships: JavaGraphRelationship[];
 }
 
+export type KuzuAdapterMode = 'auto' | 'worker' | 'node';
+
+export interface KuzuWorkerClient {
+  init?: () => Promise<void>;
+  persistGraph: (graph: KnowledgeGraph) => Promise<void>;
+  loadGraph: () => Promise<KnowledgeGraph>;
+  executeCypher: (query: string) => Promise<Array<Record<string, unknown>>>;
+  close?: () => Promise<void>;
+}
+
+export interface KuzuAdapterOptions {
+  mode?: KuzuAdapterMode;
+  workerClient?: KuzuWorkerClient;
+  loadKuzuRuntime?: () => KuzuRuntime | null;
+  enableNativeKuzu?: boolean;
+}
+
 export class KuzuAdapter {
   private readonly storagePath: string;
+  private readonly mode: KuzuAdapterMode;
+  private readonly workerClient?: KuzuWorkerClient;
+  private readonly loadKuzuRuntime: () => KuzuRuntime | null;
 
-  constructor(storagePath: string) {
+  constructor(storagePath: string, options: KuzuAdapterOptions = {}) {
     this.storagePath = storagePath;
+    this.mode = options.mode ?? 'auto';
+    this.workerClient = options.workerClient;
+    const nativeEnabled = options.enableNativeKuzu ?? process.env.CODEGB_ENABLE_NATIVE_KUZU === '1';
+    this.loadKuzuRuntime = options.loadKuzuRuntime ?? (nativeEnabled ? tryLoadKuzu : () => null);
+  }
+
+  private get kuzuPath(): string {
+    return path.join(this.storagePath, KUZU_DB_FILE);
+  }
+
+  private async withConnection<T>(handler: (connection: KuzuConnection) => Promise<T>): Promise<T> {
+    const runtime = this.loadKuzuRuntime();
+    if (!runtime) {
+      throw new Error('Kuzu runtime is not available');
+    }
+    const db = new runtime.Database(this.kuzuPath);
+    const connection = new runtime.Connection(db);
+    try {
+      await db.init();
+      await connection.init();
+      return await handler(connection);
+    } finally {
+      await connection.close().catch(() => undefined);
+      await db.close().catch(() => undefined);
+    }
+  }
+
+  private async ensureSchema(connection: KuzuConnection): Promise<void> {
+    for (const query of JAVA_SCHEMA_QUERIES) {
+      try {
+        await connection.query(query);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/already exists/i.test(message)) {
+          throw error;
+        }
+      }
+    }
+  }
+
+  private async queryAll(connection: KuzuConnection, query: string): Promise<Array<Record<string, unknown>>> {
+    const queryResult = await connection.query(query);
+    const results = Array.isArray(queryResult) ? queryResult : [queryResult];
+    const rows: Array<Record<string, unknown>> = [];
+    for (const result of results) {
+      rows.push(...(await this.resultToRows(result)));
+    }
+    return rows;
+  }
+
+  private async resultToRows(result: KuzuQueryResult): Promise<Array<Record<string, unknown>>> {
+    return result.getAll();
+  }
+
+  private async clearGraph(connection: KuzuConnection): Promise<void> {
+    await connection.query('MATCH (n:Symbol) DETACH DELETE n');
+  }
+
+  private getBackendMode(): 'worker' | 'node' {
+    if (this.mode === 'worker') {
+      if (!this.workerClient) {
+        throw new Error('Worker mode requires a worker client');
+      }
+      return 'worker';
+    }
+    if (this.mode === 'node') {
+      return 'node';
+    }
+    return this.workerClient ? 'worker' : 'node';
+  }
+
+  private getWorkerClient(): KuzuWorkerClient {
+    if (!this.workerClient) {
+      throw new Error('Worker mode requires a worker client');
+    }
+    return this.workerClient;
   }
 
   async init(): Promise<void> {
+    if (this.getBackendMode() === 'worker') {
+      await this.getWorkerClient().init?.();
+      return;
+    }
+
     await fs.mkdir(this.storagePath, { recursive: true });
     await fs.writeFile(path.join(this.storagePath, SCHEMA_FILE), `${JAVA_SCHEMA_QUERIES.join('\n\n')}\n`, 'utf8');
+    if (this.loadKuzuRuntime()) {
+      await this.withConnection(async (connection) => {
+        await this.ensureSchema(connection);
+      });
+    }
   }
 
   async persistGraph(graph: KnowledgeGraph): Promise<void> {
+    if (this.getBackendMode() === 'worker') {
+      await this.getWorkerClient().persistGraph(graph);
+      return;
+    }
+
     const payload: PersistedGraph = {
       nodes: graph.nodes,
       relationships: graph.relationships,
     };
     await fs.writeFile(path.join(this.storagePath, GRAPH_FILE), JSON.stringify(payload, null, 2), 'utf8');
+
+    if (!this.loadKuzuRuntime()) {
+      return;
+    }
+    await this.withConnection(async (connection) => {
+      await this.ensureSchema(connection);
+      await this.clearGraph(connection);
+
+      const createSymbol = await connection.prepare(
+        `
+          CREATE (s:Symbol {
+            id: $id,
+            label: $label,
+            name: $name,
+            qualifiedName: $qualifiedName,
+            filePath: $filePath,
+            payload: $payload
+          })
+        `,
+      );
+      if (!createSymbol.isSuccess()) {
+        throw new Error(createSymbol.getErrorMessage());
+      }
+
+      for (const node of graph.nodes) {
+        await connection.execute(createSymbol, {
+          id: node.id,
+          label: node.label,
+          name: node.properties.name,
+          qualifiedName: node.properties.qualifiedName ?? '',
+          filePath: node.properties.filePath,
+          payload: JSON.stringify(node.properties),
+        });
+      }
+
+      const createRelation = await connection.prepare(
+        `
+          MATCH (source:Symbol {id: $sourceId}), (target:Symbol {id: $targetId})
+          CREATE (source)-[:CodeRelation {
+            id: $id,
+            type: $type,
+            confidence: $confidence,
+            reason: $reason,
+            line: $line
+          }]->(target)
+        `,
+      );
+      if (!createRelation.isSuccess()) {
+        throw new Error(createRelation.getErrorMessage());
+      }
+
+      for (const rel of graph.relationships) {
+        await connection.execute(createRelation, {
+          id: rel.id,
+          sourceId: rel.sourceId,
+          targetId: rel.targetId,
+          type: rel.type,
+          confidence: rel.confidence,
+          reason: rel.reason,
+          line: rel.line ?? null,
+        });
+      }
+    });
   }
 
   async loadGraph(): Promise<KnowledgeGraph> {
+    if (this.getBackendMode() === 'worker') {
+      return this.getWorkerClient().loadGraph();
+    }
+
     const graph = createKnowledgeGraph();
+    try {
+      await this.withConnection(async (connection) => {
+        await this.ensureSchema(connection);
+
+        const nodeRows = await this.queryAll(connection, 'MATCH (s:Symbol) RETURN s');
+        for (const row of nodeRows) {
+          const raw = row.s as Record<string, unknown> | undefined;
+          if (!raw) {
+            continue;
+          }
+          const parsedProps =
+            typeof raw.payload === 'string'
+              ? (JSON.parse(raw.payload) as JavaGraphNode['properties'])
+              : ({ name: String(raw.name ?? ''), filePath: String(raw.filePath ?? '') } as JavaGraphNode['properties']);
+          graph.addNode({
+            id: String(raw.id),
+            label: String(raw.label) as JavaGraphNode['label'],
+            properties: parsedProps,
+          });
+        }
+
+        const relRows = await this.queryAll(
+          connection,
+          `
+            MATCH (source:Symbol)-[r:CodeRelation]->(target:Symbol)
+            RETURN
+              source.id as sourceId,
+              target.id as targetId,
+              r.id as id,
+              r.type as type,
+              r.confidence as confidence,
+              r.reason as reason,
+              r.line as line
+          `,
+        );
+        for (const row of relRows) {
+          graph.addRelationship({
+            id: String(row.id),
+            sourceId: String(row.sourceId),
+            targetId: String(row.targetId),
+            type: String(row.type) as JavaGraphRelationship['type'],
+            confidence: Number(row.confidence ?? 1),
+            reason: String(row.reason ?? ''),
+            line: typeof row.line === 'number' ? row.line : undefined,
+          });
+        }
+      });
+      if (graph.nodeCount > 0 || graph.relationshipCount > 0) {
+        return graph;
+      }
+    } catch {
+      // Fall through to JSON fallback for backward compatibility.
+    }
+
     const content = await fs.readFile(path.join(this.storagePath, GRAPH_FILE), 'utf8');
     const payload = JSON.parse(content) as PersistedGraph;
     payload.nodes.forEach((node) => graph.addNode(node));
@@ -69,8 +346,24 @@ export class KuzuAdapter {
   }
 
   async executeCypher(query: string, graph?: KnowledgeGraph): Promise<Array<Record<string, unknown>>> {
-    const activeGraph = graph ?? (await this.loadGraph());
-    return executeCypherInMemory(activeGraph, query);
+    if (this.getBackendMode() === 'worker') {
+      return this.getWorkerClient().executeCypher(query);
+    }
+
+    try {
+      return (await this.withConnection(async (connection) => this.queryAll(connection, query))) as Array<
+        Record<string, unknown>
+      >;
+    } catch {
+      const activeGraph = graph ?? (await this.loadGraph());
+      return executeCypherInMemory(activeGraph, query);
+    }
+  }
+
+  async close(): Promise<void> {
+    if (this.getBackendMode() === 'worker') {
+      await this.getWorkerClient().close?.();
+    }
   }
 }
 

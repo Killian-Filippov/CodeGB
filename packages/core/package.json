@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "kuzu": "^0.11.0",
+    "kuzu-wasm": "^0.11.3",
     "tree-sitter": "^0.21.0",
     "tree-sitter-java": "^0.21.0"
   }

@@ -6,6 +6,8 @@ export * from './parser/parser-loader';
 export * from './parser/ast-extractor';
 export * from './storage/schema';
 export * from './storage/kuzu-adapter';
+export * from './storage/web-worker-kuzu-client';
+export * from './storage/kuzu-worker';
 export * from './ingestion/pipeline';
 export * from './search/keyword-search';
 export * from './search/context-builder';
