@@ -1,5 +1,7 @@
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -12,6 +14,9 @@ import { runPipelineFromRepo } from '../../core/src/ingestion/pipeline';
 import { searchByKeyword } from '../../core/src/search/keyword-search';
 import { executeCypherInMemory, KuzuAdapter } from '../../core/src/storage/kuzu-adapter';
 import type { JavaGraphNode, KnowledgeGraph } from '../../core/src/types/graph';
+import { buildToolCacheKey, PersistentToolCache, TtlLruCache } from './tool-cache';
+
+const execFileAsync = promisify(execFile);
 
 const MIN_NODE_MAJOR = 18;
 type StartupErrorCode = 'E_NODE_VERSION' | 'E_STORAGE_PERM' | 'E_WORKER_UNAVAILABLE' | 'E_BACKEND_INIT' | 'E_INTERNAL';
@@ -128,6 +133,15 @@ const readRepoConfig = async (storagePath: string): Promise<{ repoName: string; 
 
 const AUTO_INDEX_INTERVAL_ENV_KEY = 'CODEGB_AUTO_INDEX_INTERVAL_MS';
 const DEFAULT_AUTO_INDEX_INTERVAL_MS = 3000;
+const CACHE_TTL_ENV_KEY = 'CODEGB_MCP_CACHE_TTL_MS';
+const CACHE_L1_CAPACITY_ENV_KEY = 'CODEGB_MCP_CACHE_L1_MAX_ENTRIES';
+const CACHE_L2_CAPACITY_ENV_KEY = 'CODEGB_MCP_CACHE_L2_MAX_ENTRIES';
+const DEFAULT_CACHE_TTL_MS = 60_000;
+const DEFAULT_CACHE_L1_CAPACITY = 256;
+const DEFAULT_CACHE_L2_CAPACITY = 4096;
+const CACHED_TOOLS = new Set(['query', 'context']);
+const CACHE_FILE_NAME = 'mcp-tool-cache.v1.json';
+const REPO_COMMIT_TTL_MS = 3_000;
 
 const resolveAutoIndexIntervalMs = (): number => {
   const raw = process.env[AUTO_INDEX_INTERVAL_ENV_KEY];
@@ -139,6 +153,52 @@ const resolveAutoIndexIntervalMs = (): number => {
     return 0;
   }
   return Math.max(1000, Math.floor(parsed));
+};
+
+const resolveNonNegativeIntEnv = (envKey: string, fallback: number): number => {
+  const raw = process.env[envKey];
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
+};
+
+const resolveCacheConfig = (): { ttlMs: number; l1Capacity: number; l2Capacity: number } => {
+  return {
+    ttlMs: resolveNonNegativeIntEnv(CACHE_TTL_ENV_KEY, DEFAULT_CACHE_TTL_MS),
+    l1Capacity: resolveNonNegativeIntEnv(CACHE_L1_CAPACITY_ENV_KEY, DEFAULT_CACHE_L1_CAPACITY),
+    l2Capacity: resolveNonNegativeIntEnv(CACHE_L2_CAPACITY_ENV_KEY, DEFAULT_CACHE_L2_CAPACITY),
+  };
+};
+
+const createCommitResolver = () => {
+  const commitCache = new Map<string, { commit: string; expiresAt: number }>();
+
+  return async (repoPath: string): Promise<string> => {
+    const now = Date.now();
+    const cached = commitCache.get(repoPath);
+    if (cached && cached.expiresAt > now) {
+      return cached.commit;
+    }
+
+    let commit = 'NO_GIT_HEAD';
+    try {
+      const output = await execFileAsync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+      const resolved = String(output.stdout ?? '').trim();
+      if (resolved) {
+        commit = resolved;
+      }
+    } catch {
+      // Ignore git errors and keep fallback commit marker.
+    }
+
+    commitCache.set(repoPath, { commit, expiresAt: now + REPO_COMMIT_TTL_MS });
+    return commit;
+  };
 };
 
 const startAutoIncrementalIndexing = (options: {
@@ -413,6 +473,15 @@ const main = async (): Promise<void> => {
   const storagePath = process.env.JAVA_KG_DB_PATH ?? path.resolve('.javakg');
   const adapter = new KuzuAdapter(storagePath);
   await runStartupChecks(storagePath, adapter);
+  const repoConfig = await readRepoConfig(storagePath);
+  const cacheConfig = resolveCacheConfig();
+  const l1Cache = new TtlLruCache<Record<string, unknown>>(cacheConfig.ttlMs, cacheConfig.l1Capacity);
+  const l2Cache = new PersistentToolCache<Record<string, unknown>>({
+    filePath: path.join(storagePath, CACHE_FILE_NAME),
+    ttlMs: cacheConfig.ttlMs,
+    maxEntries: cacheConfig.l2Capacity,
+  });
+  const resolveCommit = createCommitResolver();
 
   const safeLoadGraph = async (): Promise<KnowledgeGraph> => {
     try {
@@ -420,6 +489,57 @@ const main = async (): Promise<void> => {
     } catch {
       return createKnowledgeGraph();
     }
+  };
+
+  const runWithToolCache = async (
+    toolName: string,
+    rawArgs: Record<string, unknown>,
+    compute: () => Promise<Record<string, unknown>>,
+  ): Promise<Record<string, unknown>> => {
+    if (!CACHED_TOOLS.has(toolName)) {
+      return compute();
+    }
+
+    const repoFromArgs = typeof rawArgs.repo === 'string' && rawArgs.repo.trim() ? rawArgs.repo.trim() : null;
+    const repoIdentity = repoFromArgs ?? repoConfig.repoPath;
+    const commitRepoPath = repoFromArgs && path.isAbsolute(repoFromArgs) ? repoFromArgs : repoConfig.repoPath;
+
+    let cacheKey: string | null = null;
+    try {
+      const commit = await resolveCommit(commitRepoPath);
+      cacheKey = buildToolCacheKey({
+        repo: repoIdentity,
+        commit,
+        tool: toolName,
+        args: rawArgs,
+      });
+
+      const inMemory = l1Cache.get(cacheKey);
+      if (inMemory) {
+        return inMemory;
+      }
+
+      const persisted = await l2Cache.get(cacheKey);
+      if (persisted) {
+        l1Cache.set(cacheKey, persisted);
+        return persisted;
+      }
+    } catch {
+      cacheKey = null;
+    }
+
+    const fresh = await compute();
+    if (!cacheKey) {
+      return fresh;
+    }
+
+    l1Cache.set(cacheKey, fresh);
+    try {
+      await l2Cache.set(cacheKey, fresh);
+    } catch {
+      // Ignore persistence errors and continue with in-memory cache.
+    }
+    return fresh;
   };
 
   const tools = [
@@ -491,80 +611,100 @@ const main = async (): Promise<void> => {
       return { content: [{ type: 'text', text: JSON.stringify({ repos }) }] };
     }
 
-    const graph = await safeLoadGraph();
+    let graphPromise: Promise<KnowledgeGraph> | null = null;
+    const loadGraph = async (): Promise<KnowledgeGraph> => {
+      if (!graphPromise) {
+        graphPromise = safeLoadGraph();
+      }
+      return graphPromise;
+    };
 
     if (name === 'query') {
       const query = String(args.query ?? '').trim();
       const limit = Number(args.limit ?? 10);
-      const lowered = query.toLowerCase();
-      const results = searchByKeyword(graph, query, limit)
-        .map((item) => ({
-          name: item.node.properties.name,
-          type: item.node.label === 'Constructor' ? 'Class' : item.node.label,
-          qualifiedName: item.node.properties.qualifiedName,
-          file: item.node.properties.filePath,
-          score: Number(item.score.toFixed(4)),
-        }))
-        .filter((item) => {
-          if (!query) {
-            return true;
-          }
-          return (
-            String(item.name).toLowerCase().includes(lowered) ||
-            String(item.qualifiedName ?? '').toLowerCase().includes(lowered)
-          );
-        });
-      return { content: [{ type: 'text', text: JSON.stringify({ results }) }] };
+      const normalizedArgs = {
+        query,
+        limit,
+        repo: typeof args.repo === 'string' ? args.repo.trim() : '',
+      };
+
+      const payload = await runWithToolCache('query', normalizedArgs, async () => {
+        const graph = await loadGraph();
+        const lowered = query.toLowerCase();
+        const results = searchByKeyword(graph, query, limit)
+          .map((item) => ({
+            name: item.node.properties.name,
+            type: item.node.label === 'Constructor' ? 'Class' : item.node.label,
+            qualifiedName: item.node.properties.qualifiedName,
+            file: item.node.properties.filePath,
+            score: Number(item.score.toFixed(4)),
+          }))
+          .filter((item) => {
+            if (!query) {
+              return true;
+            }
+            return (
+              String(item.name).toLowerCase().includes(lowered) ||
+              String(item.qualifiedName ?? '').toLowerCase().includes(lowered)
+            );
+          });
+        return { results };
+      });
+
+      return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
     }
 
     if (name === 'context') {
       const symbolName = String(args.symbol ?? '');
       const includeCalls = args.include_calls !== false;
-      const symbolNode =
-        graph.nodes.find((n) => n.properties.name === symbolName || n.properties.qualifiedName === symbolName) ??
-        null;
-      if (!symbolNode) {
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ symbol: null, methods: [], fields: [], calls: [] }) }],
-        };
-      }
-
-      const methods = graph.relationships
-        .filter((r) => r.sourceId === symbolNode.id && r.type === 'CONTAINS')
-        .map((r) => graph.getNode(r.targetId))
-        .filter((n): n is JavaGraphNode => !!n && n.label === 'Method')
-        .map(toSymbol);
-
-      const fields = graph.relationships
-        .filter((r) => r.sourceId === symbolNode.id && r.type === 'CONTAINS')
-        .map((r) => graph.getNode(r.targetId))
-        .filter((n): n is JavaGraphNode => !!n && n.label === 'Field')
-        .map((n) => ({ ...toSymbol(n), type: n.label, fieldType: n.properties.type }));
-
-      const calls = includeCalls
-        ? graph.relationships
-            .filter((r) => r.sourceId === symbolNode.id && r.type === 'CALLS')
-            .map((r) => graph.getNode(r.targetId))
-            .filter((n): n is JavaGraphNode => !!n)
-            .map(toSymbol)
-        : [];
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              symbol: toSymbol(symbolNode),
-              methods,
-              fields,
-              calls,
-            }),
-          },
-        ],
+      const normalizedArgs = {
+        symbol: symbolName,
+        include_calls: includeCalls,
+        repo: typeof args.repo === 'string' ? args.repo.trim() : '',
       };
+
+      const payload = await runWithToolCache('context', normalizedArgs, async () => {
+        const graph = await loadGraph();
+        const symbolNode =
+          graph.nodes.find((n) => n.properties.name === symbolName || n.properties.qualifiedName === symbolName) ??
+          null;
+        if (!symbolNode) {
+          return { symbol: null, methods: [], fields: [], calls: [] };
+        }
+
+        const methods = graph.relationships
+          .filter((r) => r.sourceId === symbolNode.id && r.type === 'CONTAINS')
+          .map((r) => graph.getNode(r.targetId))
+          .filter((n): n is JavaGraphNode => !!n && n.label === 'Method')
+          .map(toSymbol);
+
+        const fields = graph.relationships
+          .filter((r) => r.sourceId === symbolNode.id && r.type === 'CONTAINS')
+          .map((r) => graph.getNode(r.targetId))
+          .filter((n): n is JavaGraphNode => !!n && n.label === 'Field')
+          .map((n) => ({ ...toSymbol(n), type: n.label, fieldType: n.properties.type }));
+
+        const calls = includeCalls
+          ? graph.relationships
+              .filter((r) => r.sourceId === symbolNode.id && r.type === 'CALLS')
+              .map((r) => graph.getNode(r.targetId))
+              .filter((n): n is JavaGraphNode => !!n)
+              .map(toSymbol)
+          : [];
+
+        return {
+          symbol: toSymbol(symbolNode),
+          methods,
+          fields,
+          calls,
+        };
+      });
+
+      return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
     }
 
     if (name === 'impact') {
+      const graph = await loadGraph();
       const targetName = String(args.target ?? '');
       const direction = String(args.direction ?? 'upstream') as 'upstream' | 'downstream';
       const maxDepth = Number(args.maxDepth ?? 3);
@@ -611,7 +751,6 @@ const main = async (): Promise<void> => {
     throw new Error(`Unknown tool: ${name}`);
   });
 
-  const repoConfig = await readRepoConfig(storagePath);
   const autoIndexIntervalMs = resolveAutoIndexIntervalMs();
   if (autoIndexIntervalMs > 0) {
     startAutoIncrementalIndexing({
