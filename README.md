@@ -1,75 +1,78 @@
 # CodeGB
 
-CodeGB 是一个面向本地开发者环境的代码知识图谱工具，提供可在本机运行的 MCP Server，供 MCP Client（如 Claude/Cursor）调用。
+CodeGB is a code knowledge graph tool for local developer environments. It provides an MCP Server that runs on your machine and can be called by MCP Clients (such as Claude/Cursor).
 
-## 功能概览
+## Feature Overview
 
-- Java 代码解析与图谱构建（类、方法、字段、调用、继承、导入）
-- MCP 工具：
+- Java code parsing and graph construction (classes, methods, fields, calls, inheritance, imports)
+- MCP tools:
   - `query`
   - `context`
   - `impact`
   - `cypher`
   - `list_repos`
-- 本地优先存储与查询
-- 可切换图存储后端（WASM / Native）
+- Local-first storage and querying
+- Switchable graph storage backend (WASM / Native)
 
-## 环境要求
+## Requirements
 
 - Node.js 18+
 - pnpm
 
-## 安装依赖
+## Install Dependencies
 
 ```bash
 pnpm install
 ```
 
-## 构建
+## Build
 
 ```bash
 pnpm build
 ```
 
-## 本地使用（CLI）
+## Local Usage (CLI)
 
 ```bash
-# 1) 初始化仓库索引目录
+# 1) Initialize the repository index directory
 pnpm exec tsx packages/cli/src/index.ts init /path/to/your/repo --storage .javakg
 
-# 2) 建索引
+# 2) Build index
 pnpm exec tsx packages/cli/src/index.ts index /path/to/your/repo --storage .javakg
 
-# 2.1) 增量建索引（仅处理 git diff 变更的 Java 文件）
+# 2.1) Incremental indexing (only process changed Java files in git diff)
 pnpm exec tsx packages/cli/src/index.ts index /path/to/your/repo --storage .javakg --changed-files
 
-# 3) 查询
+# 3) Query
 pnpm exec tsx packages/cli/src/index.ts query "payment" --storage .javakg --limit 10
 ```
 
-## 启动 MCP Server（stdio）
+## Start MCP Server (stdio)
 
 ```bash
 JAVA_KG_DB_PATH=.javakg pnpm exec tsx packages/mcp-server/src/cli.ts
 ```
 
-说明：
-- 该进程通过 stdio 与 MCP Client 通信。
-- MCP Client 里将此命令配置为 MCP Server 启动命令即可。
+Notes:
+- This process communicates with the MCP Client via stdio.
+- In your MCP Client, configure this command as the MCP Server startup command.
 
-## MCP Client 配置模板（最小可用）
+## MCP Client Config Template (Minimal Working Setup)
 
-下面的模板统一使用：
+Use the following template consistently:
 - `command`: `pnpm`
 - `args`: `["exec", "tsx", "packages/mcp-server/src/cli.ts"]`
-- `env.JAVA_KG_DB_PATH`: 你的索引目录（需与 `--storage` 一致）
-- `env.CODEGB_AUTO_INDEX_INTERVAL_MS`: MCP 后台自动增量索引轮询间隔（毫秒，默认 `3000`，设为 `0` 可关闭）
+- `env.JAVA_KG_DB_PATH`: your index directory (must match `--storage`)
+- `env.CODEGB_AUTO_INDEX_INTERVAL_MS`: polling interval (ms) for MCP background incremental indexing (default `3000`, set to `0` to disable)
+- `env.CODEGB_MCP_CACHE_TTL_MS`: cache TTL (ms) for MCP `query/context` (default `60000`, set to `0` to disable)
+- `env.CODEGB_MCP_CACHE_L1_MAX_ENTRIES`: in-process L1 cache size (default `256`, set to `0` to disable)
+- `env.CODEGB_MCP_CACHE_L2_MAX_ENTRIES`: persistent L2 cache size (default `4096`, set to `0` to disable)
 
-请将 `"/ABS/PATH/TO/vibe-coding-plugin"` 和 `"/ABS/PATH/TO/.javakg"` 替换成绝对路径。
+Replace `"/ABS/PATH/TO/vibe-coding-plugin"` and `"/ABS/PATH/TO/.javakg"` with absolute paths.
 
 ### Claude Desktop
 
-配置文件（macOS）通常在 `~/Library/Application Support/Claude/claude_desktop_config.json`：
+The config file (macOS) is usually at `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -88,7 +91,7 @@ JAVA_KG_DB_PATH=.javakg pnpm exec tsx packages/mcp-server/src/cli.ts
 
 ### Cursor
 
-工作区文件 `.cursor/mcp.json`：
+Workspace file `.cursor/mcp.json`:
 
 ```json
 {
@@ -107,7 +110,7 @@ JAVA_KG_DB_PATH=.javakg pnpm exec tsx packages/mcp-server/src/cli.ts
 
 ### VS Code
 
-工作区文件 `.vscode/mcp.json`：
+Workspace file `.vscode/mcp.json`:
 
 ```json
 {
@@ -125,47 +128,47 @@ JAVA_KG_DB_PATH=.javakg pnpm exec tsx packages/mcp-server/src/cli.ts
 }
 ```
 
-## 首次索引（MCP 前置）
+## First-Time Indexing (Required Before MCP)
 
-MCP 只提供查询，首次必须先做 `init + index`：
+MCP only provides queries. For first-time usage, run `init + index` first:
 
 ```bash
 pnpm exec tsx packages/cli/src/index.ts init /ABS/PATH/TO/REPO --storage /ABS/PATH/TO/.javakg
 pnpm exec tsx packages/cli/src/index.ts index /ABS/PATH/TO/REPO --storage /ABS/PATH/TO/.javakg
 ```
 
-## 常见问题（FAQ）
+## FAQ
 
-- Q: 能连上 MCP，但结果为空？
-  A: 通常是未完成首次索引，或 `JAVA_KG_DB_PATH` 与索引 `--storage` 不一致。
-- Q: 启动失败并输出 JSON 错误码？
-  A: `E_NODE_VERSION`（Node < 18）、`E_STORAGE_PERM`（目录不可写）、`E_WORKER_UNAVAILABLE`（Worker 不可用）、`E_BACKEND_INIT`（后端初始化失败）。
-- Q: 报 `pnpm` 找不到？
-  A: 确保客户端运行环境 `PATH` 可找到 `pnpm`，或改用 `pnpm` 绝对路径。
-- Q: `list_repos` 显示旧仓库？
-  A: 对新仓库重新执行 `init + index`，并更新 `JAVA_KG_DB_PATH`。
+- Q: MCP connects successfully, but returns empty results?
+  A: Usually initial indexing was not completed, or `JAVA_KG_DB_PATH` does not match index `--storage`.
+- Q: Startup fails with JSON error codes?
+  A: `E_NODE_VERSION` (Node < 18), `E_STORAGE_PERM` (directory not writable), `E_WORKER_UNAVAILABLE` (worker unavailable), `E_BACKEND_INIT` (backend initialization failed).
+- Q: `pnpm` not found?
+  A: Ensure `pnpm` is available in the client runtime `PATH`, or use an absolute path to `pnpm`.
+- Q: `list_repos` shows old repositories?
+  A: Re-run `init + index` for the new repository and update `JAVA_KG_DB_PATH`.
 
-## 降级行为
+## Fallback Behavior
 
-- 后端降级：`CODEGB_DB_BACKEND=auto` 时，优先 `wasm`，失败自动回退到 `native`，并打印一次性诊断日志。
-- Cypher 降级：`cypher` 工具优先走后端；后端不可用或返回不兼容结果时，自动回退到内存图兼容执行路径。
-- 数据降级：若索引目录为空或图加载失败，服务以空图启动，工具返回空结果而非进程崩溃。
+- Backend fallback: when `CODEGB_DB_BACKEND=auto`, `wasm` is preferred, and if it fails it automatically falls back to `native`, with a one-time diagnostic log.
+- Cypher fallback: the `cypher` tool prefers backend execution; when backend is unavailable or returns incompatible results, it automatically falls back to the in-memory graph compatible execution path.
+- Data fallback: if the index directory is empty or graph loading fails, the service starts with an empty graph and tools return empty results instead of crashing the process.
 
-## 图数据库后端选择
+## Graph Database Backend Selection
 
-当前实现支持两条路径：
+The current implementation supports two paths:
 
-- `kuzu-wasm`：跨平台与安装体验更好，适合默认分发。
-- `kuzu`（native）：在部分机器上可能更快，但安装/兼容性成本更高。
+- `kuzu-wasm`: better cross-platform compatibility and installation experience, suitable for default distribution.
+- `kuzu` (native): may be faster on some machines, but has higher installation/compatibility cost.
 
-统一开关：
+Unified switch:
 - `CODEGB_DB_BACKEND=wasm|native|auto`
-- 默认值：`wasm`（兼容性优先）
-- `auto`：优先尝试 `wasm`，失败后自动回退到 `native`，并打印一次性诊断日志
+- Default: `wasm` (compatibility first)
+- `auto`: try `wasm` first, automatically fall back to `native` on failure, and print a one-time diagnostic log.
 
-> 说明：后端切换能力已在 core 层实现，具体运行策略可通过启动配置统一管理。
+> Note: backend switching has been implemented in the core layer. The concrete runtime strategy can be managed uniformly through startup configuration.
 
-## 测试
+## Tests
 
 ```bash
 # Core tests
@@ -175,9 +178,9 @@ pnpm exec tsx --test packages/core/test/*.test.ts
 pnpm test:e2e
 ```
 
-## 项目结构
+## Project Structure
 
-- `packages/core`: 解析、图模型、存储适配、搜索、MCP 工具逻辑
-- `packages/mcp-server`: MCP Server 启动与协议对接
-- `packages/cli`: 本地初始化/索引/查询命令
-- `tests/e2e`: 端到端测试
+- `packages/core`: parsing, graph models, storage adapters, search, MCP tool logic
+- `packages/mcp-server`: MCP Server startup and protocol integration
+- `packages/cli`: local init/index/query commands
+- `tests/e2e`: end-to-end tests
