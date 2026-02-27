@@ -68,7 +68,7 @@ Use the following template consistently:
 - `env.CODEGB_MCP_CACHE_L1_MAX_ENTRIES`: in-process L1 cache size (default `256`, set to `0` to disable)
 - `env.CODEGB_MCP_CACHE_L2_MAX_ENTRIES`: persistent L2 cache size (default `4096`, set to `0` to disable)
 
-Replace `"/ABS/PATH/TO/vibe-coding-plugin"` and `"/ABS/PATH/TO/.javakg"` with absolute paths.
+Replace `"/ABS/PATH/TO/CodeGB"` and `"/ABS/PATH/TO/.javakg"` with absolute paths.
 
 ### Claude Desktop
 
@@ -80,7 +80,7 @@ The config file (macOS) is usually at `~/Library/Application Support/Claude/clau
     "codegb": {
       "command": "pnpm",
       "args": ["exec", "tsx", "packages/mcp-server/src/cli.ts"],
-      "cwd": "/ABS/PATH/TO/vibe-coding-plugin",
+      "cwd": "/ABS/PATH/TO/CodeGB",
       "env": {
         "JAVA_KG_DB_PATH": "/ABS/PATH/TO/.javakg"
       }
@@ -99,7 +99,7 @@ Workspace file `.cursor/mcp.json`:
     "codegb": {
       "command": "pnpm",
       "args": ["exec", "tsx", "packages/mcp-server/src/cli.ts"],
-      "cwd": "/ABS/PATH/TO/vibe-coding-plugin",
+      "cwd": "/ABS/PATH/TO/CodeGB",
       "env": {
         "JAVA_KG_DB_PATH": "/ABS/PATH/TO/.javakg"
       }
@@ -119,7 +119,7 @@ Workspace file `.vscode/mcp.json`:
       "type": "stdio",
       "command": "pnpm",
       "args": ["exec", "tsx", "packages/mcp-server/src/cli.ts"],
-      "cwd": "/ABS/PATH/TO/vibe-coding-plugin",
+      "cwd": "/ABS/PATH/TO/CodeGB",
       "env": {
         "JAVA_KG_DB_PATH": "/ABS/PATH/TO/.javakg"
       }
