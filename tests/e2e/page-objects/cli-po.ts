@@ -20,18 +20,21 @@ export interface CLICommandResult {
 export interface CLIOptions {
   cwd?: string;
   timeout?: number;
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface InitOptions {
   repoPath: string;
   dbPath?: string;
   force?: boolean;
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface IndexOptions {
   repoPath?: string;
   dbPath?: string;
   verbose?: boolean;
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface QueryOptions {
@@ -39,6 +42,7 @@ export interface QueryOptions {
   dbPath?: string;
   limit?: number;
   type?: string;
+  env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -91,6 +95,10 @@ export class CLIPO {
         : [this.cliPath, command, ...args];
       const child = spawn(executable, commandArgs, {
         cwd: options.cwd || process.cwd(),
+        env: {
+          ...process.env,
+          ...(options.env ?? {}),
+        },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
@@ -182,7 +190,7 @@ export class CLIPO {
     if (options.force) {
       args.push('--force');
     }
-    const result = await this.execute('init', args);
+    const result = await this.execute('init', args, { env: options.env });
     if (result.success) {
       await fs.mkdir(path.join(options.repoPath, '.javakg'), { recursive: true });
       await fs.writeFile(
@@ -212,7 +220,7 @@ export class CLIPO {
       args.push('--verbose');
     }
 
-    return this.execute('index', args);
+    return this.execute('index', args, { env: options.env });
   }
 
   /**
@@ -227,7 +235,7 @@ export class CLIPO {
       args.push('--limit', `${options.limit}`);
     }
 
-    const result = await this.execute('query', args);
+    const result = await this.execute('query', args, { env: options.env });
     if (result.success && options.type) {
       const typedLines = result.stdout
         .split('\n')
