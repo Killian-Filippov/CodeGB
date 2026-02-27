@@ -178,6 +178,19 @@ pnpm exec tsx --test packages/core/test/*.test.ts
 pnpm test:e2e
 ```
 
+## Release Gate
+
+Before publishing a developer-trial version, run:
+
+```bash
+pnpm run release:gate
+```
+
+Gate conditions:
+- Core e2e passes (`pnpm test:e2e:phase1`)
+- `benchmark.md` exists
+- `docs/release-notes.md` contains the current version heading (`## v<version>`)
+
 ## Project Structure
 
 - `packages/core`: parsing, graph models, storage adapters, search, MCP tool logic

@@ -1,6 +1,6 @@
 {
   "name": "codegb",
-  "version": "0.1.0",
+  "version": "0.2.0-beta.1",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -20,7 +20,9 @@
     "test:e2e:phase1:mcp": "tsx --test \"tests/e2e/phase1/mcp-tools.spec.ts\"",
     "test:e2e:phase1:cli": "tsx --test \"tests/e2e/phase1/cli-workflow.spec.ts\"",
     "build": "pnpm -r build",
-    "benchmark:mcp": "pnpm exec tsx scripts/benchmark-mcp.ts"
+    "benchmark:mcp": "pnpm exec tsx scripts/benchmark-mcp.ts",
+    "release:gate": "pnpm exec tsx scripts/release-gate.ts",
+    "release:prepare": "pnpm run release:gate"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

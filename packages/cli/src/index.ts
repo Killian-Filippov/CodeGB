@@ -18,7 +18,7 @@ export interface CliResult {
 }
 
 const DEFAULT_STORAGE = '.javakg';
-const CLI_VERSION = '0.1.0';
+const CLI_VERSION = '0.2.0-beta.1';
 
 const readOption = (args: string[], name: string): string | undefined => {
   const index = args.indexOf(name);

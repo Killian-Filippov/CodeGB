@@ -4,7 +4,7 @@ import { runIndexCommand } from './commands/index';
 import { runInitCommand } from './commands/init';
 import { runQueryCommand } from './commands/query';
 const DEFAULT_STORAGE = '.javakg';
-const CLI_VERSION = '0.1.0';
+const CLI_VERSION = '0.2.0-beta.1';
 const readOption = (args, name) => {
     const index = args.indexOf(name);
     if (index < 0) {

@@ -181,7 +181,7 @@ class BenchmarkClient {
     this.client = new Client(
       {
         name: 'benchmark-client',
-        version: '0.1.0',
+        version: '0.2.0-beta.1',
       },
       { capabilities: {} },
     );

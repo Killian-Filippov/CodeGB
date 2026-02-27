@@ -596,7 +596,7 @@ const main = async (): Promise<void> => {
   ];
 
   const server = new Server(
-    { name: 'java-knowledge-graph', version: '0.1.0' },
+    { name: 'java-knowledge-graph', version: '0.2.0-beta.1' },
     { capabilities: { tools: {} } },
   );
 

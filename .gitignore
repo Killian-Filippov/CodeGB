@@ -5,3 +5,6 @@ coverage/
 .DS_Store
 *.md
 !/README.md
+!/benchmark.md
+!/docs/release-notes.md
+!/docs/benchmarks/latest.md
