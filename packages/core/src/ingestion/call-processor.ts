@@ -4,8 +4,8 @@ import type { FileExtraction, MethodRef } from './symbol-processor';
 interface ImportScope {
   explicitTypes: Set<string>;
   wildcardPackages: Set<string>;
-  staticMembers: Set<string>;
-  hasStaticWildcard: boolean;
+  staticMemberOwnersByName: Map<string, Set<string>>;
+  staticWildcardOwners: Set<string>;
 }
 
 interface ResolutionResult {
@@ -41,19 +41,29 @@ const buildQualifiedIndex = (files: FileExtraction[]): Map<string, MethodRef[]> 
 const parseImportScope = (imports: string[]): ImportScope => {
   const explicitTypes = new Set<string>();
   const wildcardPackages = new Set<string>();
-  const staticMembers = new Set<string>();
-  let hasStaticWildcard = false;
+  const staticMemberOwnersByName = new Map<string, Set<string>>();
+  const staticWildcardOwners = new Set<string>();
 
   for (const imp of imports) {
     if (imp.startsWith('static ')) {
       const target = imp.slice('static '.length).trim();
       if (target.endsWith('.*')) {
-        hasStaticWildcard = true;
+        const owner = target.slice(0, -2).trim();
+        if (owner) {
+          staticWildcardOwners.add(owner);
+        }
         continue;
       }
-      const member = target.split('.').pop();
-      if (member) {
-        staticMembers.add(member);
+      const splitIndex = target.lastIndexOf('.');
+      if (splitIndex <= 0) {
+        continue;
+      }
+      const owner = target.slice(0, splitIndex).trim();
+      const member = target.slice(splitIndex + 1).trim();
+      if (owner && member) {
+        const owners = staticMemberOwnersByName.get(member) ?? new Set<string>();
+        owners.add(owner);
+        staticMemberOwnersByName.set(member, owners);
       }
       continue;
     }
@@ -69,8 +79,41 @@ const parseImportScope = (imports: string[]): ImportScope => {
   return {
     explicitTypes,
     wildcardPackages,
-    staticMembers,
-    hasStaticWildcard,
+    staticMemberOwnersByName,
+    staticWildcardOwners,
+  };
+};
+
+const ownerTypeOfCandidate = (candidate: MethodRef): string => {
+  return candidate.qualifiedName.split('.').slice(0, -1).join('.');
+};
+
+const resolveStaticImportCall = (
+  candidates: MethodRef[],
+  call: FileExtraction['pendingCalls'][number],
+  scope: ImportScope,
+): ResolutionResult | undefined => {
+  const explicitOwners = scope.staticMemberOwnersByName.get(call.simpleName) ?? new Set<string>();
+  const allowedOwners = new Set<string>([...scope.staticWildcardOwners, ...explicitOwners]);
+  if (allowedOwners.size === 0) {
+    return undefined;
+  }
+
+  const filtered = candidates.filter((candidate) => {
+    if (candidate.parameterCount !== call.argCount) {
+      return false;
+    }
+    return allowedOwners.has(ownerTypeOfCandidate(candidate));
+  });
+
+  if (filtered.length !== 1) {
+    return undefined;
+  }
+
+  return {
+    callee: filtered[0] as MethodRef,
+    confidence: 0.9,
+    strategy: 'static-import-owner-arity-exact',
   };
 };
 
@@ -202,8 +245,7 @@ export const processCalls = (graph: KnowledgeGraph, files: FileExtraction[]): vo
   for (const file of files) {
     const scope = parseImportScope(file.imports);
     for (const call of file.pendingCalls) {
-      if (!call.qualifiedNameHint && (scope.hasStaticWildcard || scope.staticMembers.has(call.simpleName))) {
-        // TODO(call-resolution): static-import call resolution is intentionally skipped in this phase to avoid false positives.
+      if (call.unsupportedReason) {
         continue;
       }
 
@@ -213,7 +255,12 @@ export const processCalls = (graph: KnowledgeGraph, files: FileExtraction[]): vo
       }
 
       const qualifiedCandidates = call.qualifiedNameHint ? qualifiedIndex.get(call.qualifiedNameHint) : undefined;
-      const resolved = resolveCall(candidates, qualifiedCandidates, call, scope);
+      const hasStaticImportForCall =
+        !call.qualifiedNameHint &&
+        (scope.staticWildcardOwners.size > 0 || scope.staticMemberOwnersByName.has(call.simpleName));
+      const resolved = hasStaticImportForCall
+        ? resolveStaticImportCall(candidates, call, scope)
+        : resolveCall(candidates, qualifiedCandidates, call, scope);
       if (!resolved) {
         continue;
       }
