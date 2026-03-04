@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { parseJavaSource } from '../src/parser/ast-extractor.ts';
+import { loadJavaParserRuntime } from '../src/parser/parser-loader.ts';
+import { parseJavaSourceWithTreeSitter } from '../src/parser/tree-sitter-extractor.ts';
 
 const JAVA_SOURCE = `
 package com.acme.service;
@@ -60,4 +62,55 @@ test('parseJavaSource extracts package/imports/types/methods/fields/calls', () =
   assert.ok(runMethod);
   const runCall = runMethod?.calls.find((call) => call.simpleName === 'charge');
   assert.equal(runCall?.argCount, 1);
+});
+
+test('parseJavaSourceWithTreeSitter emits constructor call sites for new/this/super', async (t) => {
+  const runtime = await loadJavaParserRuntime();
+  if (runtime.engine !== 'tree-sitter') {
+    t.skip('tree-sitter runtime unavailable');
+    return;
+  }
+
+  const source = `
+package com.acme.ctor;
+
+class Parent {
+  Parent(int v) {}
+}
+
+class Child extends Parent {
+  Child() {
+    this(1);
+  }
+
+  Child(int n) {
+    super(n);
+    Parent p = new Parent(n);
+  }
+}
+`;
+
+  const parsed = await parseJavaSourceWithTreeSitter(source, 'src/main/java/com/acme/ctor/Child.java');
+  const child = parsed.types.find((item) => item.name === 'Child');
+  assert.ok(child);
+  const noArgCtor = child?.methods.find((m) => m.name === 'Child' && m.parameters.length === 0);
+  const oneArgCtor = child?.methods.find((m) => m.name === 'Child' && m.parameters.length === 1);
+  assert.ok(noArgCtor);
+  assert.ok(oneArgCtor);
+
+  const thisCall = noArgCtor?.calls.find((call) => call.simpleName === 'Child');
+  assert.ok(thisCall);
+  assert.equal(thisCall?.argCount, 1);
+  assert.equal(thisCall?.qualifier, 'com.acme.ctor.Child');
+  assert.equal(thisCall?.unsupportedReason, undefined);
+
+  const superCall = oneArgCtor?.calls.find((call) => call.simpleName === 'Parent' && call.qualifier === undefined);
+  assert.ok(superCall);
+  assert.equal(superCall?.argCount, 1);
+  assert.equal(superCall?.unsupportedReason, undefined);
+
+  const newCall = oneArgCtor?.calls.find((call) => call.simpleName === 'Parent' && call.qualifier === 'Parent');
+  assert.ok(newCall);
+  assert.equal(newCall?.argCount, 1);
+  assert.equal(newCall?.unsupportedReason, undefined);
 });

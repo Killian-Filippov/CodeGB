@@ -69,7 +69,36 @@ const argCountOf = (argsNode: TSNode | null): number => {
   return argsNode.namedChildren.length;
 };
 
-const collectCallSites = (source: string, bodyNode: TSNode): ParsedJavaCallSite[] => {
+const cleanTypeName = (raw: string): string => {
+  return raw
+    .trim()
+    .replace(/<[^<>]*>/g, '')
+    .replace(/\[\]$/g, '')
+    .replace(/[?].*$/g, '')
+    .trim();
+};
+
+const toSimpleTypeName = (raw: string): string => {
+  const cleaned = cleanTypeName(raw);
+  const parts = cleaned.split('.');
+  return (parts[parts.length - 1] ?? cleaned).trim();
+};
+
+const toQualifiedTypeNameOrUndefined = (raw: string): string | undefined => {
+  const cleaned = cleanTypeName(raw);
+  if (!cleaned || !cleaned.includes('.')) {
+    return undefined;
+  }
+  return cleaned;
+};
+
+const collectCallSites = (
+  source: string,
+  bodyNode: TSNode,
+  currentTypeName: string,
+  currentTypeQualifiedName: string,
+  superClassRaw?: string,
+): ParsedJavaCallSite[] => {
   const sites: ParsedJavaCallSite[] = [];
   const stack = [bodyNode];
 
@@ -102,34 +131,40 @@ const collectCallSites = (source: string, bodyNode: TSNode): ParsedJavaCallSite[
     }
 
     if (node.type === 'object_creation_expression') {
-      // TODO(parser-tree-sitter): support constructor call-edge binding from `new` expressions instead of skipping downstream.
       const typeNode = node.childForFieldName('type');
       const argsNode = node.childForFieldName('arguments');
-      const typeName = textOf(source, typeNode).trim() || 'new';
+      const typeName = textOf(source, typeNode).trim();
+      const simpleName = toSimpleTypeName(typeName);
+      const qualifiedTypeName = toQualifiedTypeNameOrUndefined(typeName);
+      if (!simpleName) {
+        continue;
+      }
       sites.push({
-        rawCallee: `new ${typeName}`,
-        simpleName: 'new',
-        qualifier: typeName,
+        rawCallee: typeName ? `${typeName}.${simpleName}` : simpleName,
+        simpleName,
+        qualifier: qualifiedTypeName ?? (typeName || undefined),
         argCount: argCountOf(argsNode),
         line: node.startPosition.row + 1,
-        isQualified: true,
-        unsupportedReason: 'constructor-call',
+        isQualified: Boolean(qualifiedTypeName ?? typeName),
       });
       continue;
     }
 
     if (node.type === 'explicit_constructor_invocation') {
-      // TODO(parser-tree-sitter): support `super(...)` / `this(...)` constructor edge binding with inheritance-aware resolution.
       const argsNode = node.childForFieldName('arguments');
       const raw = textOf(source, node).trim();
-      const simpleName = raw.startsWith('this') ? 'this' : 'super';
+      const isThis = raw.startsWith('this');
+      const superSimpleName = superClassRaw ? toSimpleTypeName(superClassRaw) : '';
+      const superQualifiedName = superClassRaw ? toQualifiedTypeNameOrUndefined(superClassRaw) : undefined;
+      const simpleName = isThis ? currentTypeName : superSimpleName || 'super';
+      const qualifier = isThis ? currentTypeQualifiedName : superQualifiedName;
       sites.push({
-        rawCallee: simpleName,
+        rawCallee: qualifier ? `${qualifier}.${simpleName}` : simpleName,
         simpleName,
+        qualifier,
         argCount: argCountOf(argsNode),
         line: node.startPosition.row + 1,
-        isQualified: false,
-        unsupportedReason: 'super-this-constructor-call',
+        isQualified: Boolean(qualifier),
       });
     }
   }
@@ -164,7 +199,13 @@ const parseFieldDecl = (source: string, node: TSNode): ParsedJavaField[] => {
   return fields;
 };
 
-const parseMethodDecl = (source: string, className: string, node: TSNode): ParsedJavaMethod | undefined => {
+const parseMethodDecl = (
+  source: string,
+  className: string,
+  classQualifiedName: string,
+  superClassRaw: string | undefined,
+  node: TSNode,
+): ParsedJavaMethod | undefined => {
   if (node.type !== 'method_declaration' && node.type !== 'constructor_declaration') {
     return undefined;
   }
@@ -184,7 +225,7 @@ const parseMethodDecl = (source: string, className: string, node: TSNode): Parse
     parameters: parseParameterList(source, paramsNode),
     modifiers: splitModifiers(textOf(source, node.childForFieldName('modifiers'))),
     isConstructor: node.type === 'constructor_declaration' || name === className,
-    calls: bodyNode ? collectCallSites(source, bodyNode) : [],
+    calls: bodyNode ? collectCallSites(source, bodyNode, className, classQualifiedName, superClassRaw) : [],
     startLine: node.startPosition.row + 1,
     endLine: node.endPosition.row + 1,
   };
@@ -239,12 +280,13 @@ const parseTypeDecl = (source: string, packageName: string, node: TSNode): Parse
 
   const methods: ParsedJavaMethod[] = [];
   const fields: ParsedJavaField[] = [];
+  const classQualifiedName = packageName ? `${packageName}.${name}` : name;
   for (const child of bodyNode.namedChildren) {
     if (child.type === 'field_declaration') {
       fields.push(...parseFieldDecl(source, child));
       continue;
     }
-    const method = parseMethodDecl(source, name, child);
+    const method = parseMethodDecl(source, name, classQualifiedName, superClass, child);
     if (method) {
       methods.push(method);
     }
@@ -253,7 +295,7 @@ const parseTypeDecl = (source: string, packageName: string, node: TSNode): Parse
   return {
     kind,
     name,
-    qualifiedName: packageName ? `${packageName}.${name}` : name,
+    qualifiedName: classQualifiedName,
     modifiers: splitModifiers(textOf(source, node.childForFieldName('modifiers'))),
     superClass,
     interfaces,

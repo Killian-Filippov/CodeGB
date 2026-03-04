@@ -202,11 +202,6 @@ export const processCalls = (graph: KnowledgeGraph, files: FileExtraction[]): vo
   for (const file of files) {
     const scope = parseImportScope(file.imports);
     for (const call of file.pendingCalls) {
-      if (call.unsupportedReason) {
-        // TODO(call-resolution): add explicit support for constructor/new/super/this call edges after semantic model expansion.
-        continue;
-      }
-
       if (!call.qualifiedNameHint && (scope.hasStaticWildcard || scope.staticMembers.has(call.simpleName))) {
         // TODO(call-resolution): static-import call resolution is intentionally skipped in this phase to avoid false positives.
         continue;

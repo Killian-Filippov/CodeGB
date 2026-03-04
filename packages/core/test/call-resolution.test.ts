@@ -194,7 +194,53 @@ test('processCalls uses import scope to disambiguate same-name calls', () => {
   assert.match(rel?.reason ?? '', /strategy=name-arity-import-scope/);
 });
 
-test('processCalls skips unsupported call sites and static-import call names', () => {
+test('processCalls resolves qualified constructor call with qualifiedName-exact', () => {
+  const graph = createKnowledgeGraph();
+  const caller = makeMethod({
+    id: 'method:com.app.Caller.build',
+    name: 'build',
+    className: 'Caller',
+    qualifiedName: 'com.app.Caller.build',
+    packageName: 'com.app',
+    filePath: 'src/Caller.java',
+  });
+  const ctor = makeMethod({
+    id: 'method:com.acme.Factory.Factory(String)',
+    name: 'Factory',
+    className: 'Factory',
+    qualifiedName: 'com.acme.Factory.Factory',
+    packageName: 'com.acme',
+    parameterCount: 1,
+    filePath: 'src/Factory.java',
+  });
+
+  const extraction = makeExtraction(
+    [caller, ctor],
+    [
+      {
+        callerMethodId: caller.id,
+        callerClassName: 'Caller',
+        callerFilePath: 'src/Caller.java',
+        callerPackageName: 'com.app',
+        simpleName: 'Factory',
+        qualifiedNameHint: 'com.acme.Factory.Factory',
+        argCount: 1,
+        imports: [],
+        source: 'tree-sitter',
+        line: 40,
+      },
+    ],
+  );
+
+  processCalls(graph, [extraction]);
+  const rel = graph.relationships.find((item) => item.type === 'CALLS');
+  assert.ok(rel);
+  assert.equal(rel?.targetId, ctor.id);
+  assert.equal(rel?.confidence, 0.95);
+  assert.match(rel?.reason ?? '', /strategy=qualifiedName-exact/);
+});
+
+test('processCalls resolves constructor call sites and still skips static-import call names', () => {
   const graph = createKnowledgeGraph();
   const caller = makeMethod({
     id: 'method:com.app.Caller.call',
@@ -212,21 +258,29 @@ test('processCalls skips unsupported call sites and static-import call names', (
     packageName: 'com.app',
     parameterCount: 2,
   });
+  const ctor = makeMethod({
+    id: 'method:com.app.Caller.Caller(int)',
+    name: 'Caller',
+    className: 'Caller',
+    qualifiedName: 'com.app.Caller.Caller',
+    packageName: 'com.app',
+    parameterCount: 1,
+  });
 
   const extraction = makeExtraction(
-    [caller, target],
+    [caller, target, ctor],
     [
       {
         callerMethodId: caller.id,
         callerClassName: 'Caller',
         callerFilePath: 'src/Caller.java',
         callerPackageName: 'com.app',
-        simpleName: 'new',
+        simpleName: 'Caller',
+        qualifiedNameHint: 'com.app.Caller.Caller',
         argCount: 1,
         imports: [],
         source: 'tree-sitter',
         line: 8,
-        unsupportedReason: 'constructor-call',
       },
       {
         callerMethodId: caller.id,
@@ -244,5 +298,78 @@ test('processCalls skips unsupported call sites and static-import call names', (
   );
 
   processCalls(graph, [extraction]);
-  assert.equal(graph.relationships.filter((item) => item.type === 'CALLS').length, 0);
+  const callEdges = graph.relationships.filter((item) => item.type === 'CALLS');
+  assert.equal(callEdges.length, 1);
+  assert.equal(callEdges[0]?.targetId, ctor.id);
+});
+
+test('processCalls resolves this/super constructor calls', () => {
+  const graph = createKnowledgeGraph();
+  const childCtor = makeMethod({
+    id: 'method:com.demo.Child.Child()',
+    name: 'Child',
+    className: 'Child',
+    qualifiedName: 'com.demo.Child.Child',
+    packageName: 'com.demo',
+    parameterCount: 0,
+    filePath: 'src/Child.java',
+  });
+  const childCtorWithArg = makeMethod({
+    id: 'method:com.demo.Child.Child(int)',
+    name: 'Child',
+    className: 'Child',
+    qualifiedName: 'com.demo.Child.Child',
+    packageName: 'com.demo',
+    parameterCount: 1,
+    filePath: 'src/Child.java',
+  });
+  const parentCtor = makeMethod({
+    id: 'method:com.demo.Parent.Parent(int)',
+    name: 'Parent',
+    className: 'Parent',
+    qualifiedName: 'com.demo.Parent.Parent',
+    packageName: 'com.demo',
+    parameterCount: 1,
+    filePath: 'src/Parent.java',
+  });
+
+  const extraction = makeExtraction(
+    [childCtor, childCtorWithArg, parentCtor],
+    [
+      {
+        callerMethodId: childCtor.id,
+        callerClassName: 'Child',
+        callerFilePath: 'src/Child.java',
+        callerPackageName: 'com.demo',
+        simpleName: 'Child',
+        qualifiedNameHint: 'com.demo.Child.Child',
+        argCount: 1,
+        imports: [],
+        source: 'tree-sitter',
+        line: 10,
+      },
+      {
+        callerMethodId: childCtorWithArg.id,
+        callerClassName: 'Child',
+        callerFilePath: 'src/Child.java',
+        callerPackageName: 'com.demo',
+        simpleName: 'Parent',
+        argCount: 1,
+        imports: [],
+        source: 'tree-sitter',
+        line: 14,
+      },
+    ],
+    { filePath: 'src/Child.java', packageName: 'com.demo' },
+  );
+
+  processCalls(graph, [extraction]);
+  const thisEdge = graph.relationships.find((item) => item.line === 10);
+  const superEdge = graph.relationships.find((item) => item.line === 14);
+  assert.ok(thisEdge);
+  assert.ok(superEdge);
+  assert.equal(thisEdge?.targetId, childCtorWithArg.id);
+  assert.equal(thisEdge?.confidence, 0.95);
+  assert.equal(superEdge?.targetId, parentCtor.id);
+  assert.equal(superEdge?.confidence, 0.75);
 });
