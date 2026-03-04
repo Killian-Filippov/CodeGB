@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { createKnowledgeGraph } from '../src/graph/graph.ts';
 import {
   KuzuAdapter,
+  __resetKuzuAdapterDiagnosticsForTests,
   type KuzuWorkerClient,
 } from '../src/storage/kuzu-adapter.ts';
 
@@ -172,6 +173,7 @@ test('CODEGB_DB_BACKEND=wasm forces worker backend when worker client is provide
 
 test('CODEGB_DB_BACKEND=auto prefers native and falls back once with one-time diagnostic', async () => {
   await withEnv('CODEGB_DB_BACKEND', 'auto', async () => {
+    __resetKuzuAdapterDiagnosticsForTests();
     const warnMessages: string[] = [];
     const originalWarn = console.warn;
     console.warn = (message?: unknown) => {

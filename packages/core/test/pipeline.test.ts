@@ -82,5 +82,11 @@ test('runPipelineFromRepo builds Java graph with key relations', async () => {
   assert.ok(classNames.includes('BaseService'));
   assert.ok(classNames.includes('Auditable'));
 
+  const callEdges = result.graph.relationships.filter((rel) => rel.type === 'CALLS');
+  assert.ok(callEdges.length > 0);
+  assert.ok(callEdges.every((rel) => rel.confidence !== 0.9));
+  assert.ok(callEdges.every((rel) => rel.reason.includes('strategy=')));
+  assert.ok(callEdges.every((rel) => Number.isInteger(rel.line)));
+
   assert.ok(result.persisted);
 });

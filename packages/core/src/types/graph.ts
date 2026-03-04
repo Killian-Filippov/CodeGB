@@ -81,9 +81,19 @@ export interface ParsedJavaMethod {
   parameters: string[];
   modifiers: string[];
   isConstructor: boolean;
-  calls: string[];
+  calls: ParsedJavaCallSite[];
   startLine: number;
   endLine: number;
+}
+
+export interface ParsedJavaCallSite {
+  rawCallee: string;
+  simpleName: string;
+  qualifier?: string;
+  argCount: number;
+  line: number;
+  isQualified: boolean;
+  unsupportedReason?: string;
 }
 
 export interface ParsedJavaType {

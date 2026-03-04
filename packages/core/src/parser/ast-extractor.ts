@@ -1,5 +1,6 @@
 import type {
   ParsedJavaFile,
+  ParsedJavaCallSite,
   ParsedJavaMethod,
   ParsedJavaType,
   ParsedJavaField,
@@ -13,7 +14,7 @@ const METHOD_REGEX =
 const FIELD_REGEX =
   /^\s*((?:(?:public|protected|private|static|final|volatile|transient)\s+)*)((?:[A-Za-z_][\w<>\[\].?]*))\s+([A-Za-z_]\w*)\s*(?:=[^;]+)?;\s*$/;
 
-const CALL_REGEX = /\b([A-Za-z_]\w*)\s*\(/g;
+const CALL_REGEX = /\b((?:[A-Za-z_]\w*\s*\.\s*)*)([A-Za-z_]\w*)\s*\(/g;
 const JAVA_KEYWORDS = new Set([
   'if',
   'for',
@@ -63,20 +64,73 @@ const findMatchingBrace = (source: string, openIndex: number): number => {
   return source.length - 1;
 };
 
-const extractCalls = (body: string): string[] => {
-  const calls = new Set<string>();
+const countArgs = (source: string, openParenIndex: number): number => {
+  let depth = 0;
+  let args = 0;
+  let hasToken = false;
+
+  for (let i = openParenIndex; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === '(') {
+      depth += 1;
+      continue;
+    }
+    if (char === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        return hasToken ? args + 1 : 0;
+      }
+      continue;
+    }
+    if (depth === 1) {
+      if (char === ',') {
+        args += 1;
+        hasToken = false;
+      } else if (!/\s/.test(char)) {
+        hasToken = true;
+      }
+    }
+  }
+
+  return hasToken ? args + 1 : 0;
+};
+
+const extractCalls = (body: string, methodStartLine: number): ParsedJavaCallSite[] => {
+  const calls: ParsedJavaCallSite[] = [];
   let match = CALL_REGEX.exec(body);
 
   while (match) {
-    const name = match[1];
-    if (name && !JAVA_KEYWORDS.has(name)) {
-      calls.add(name);
+    const qualifierRaw = (match[1] ?? '').replace(/\s+/g, '');
+    const name = match[2] ?? '';
+    if (!name || JAVA_KEYWORDS.has(name)) {
+      match = CALL_REGEX.exec(body);
+      continue;
     }
+
+    const whole = match[0] ?? '';
+    const callStart = match.index ?? 0;
+    const openParenOffset = whole.lastIndexOf('(');
+    const openParenIndex = callStart + openParenOffset;
+    const argCount = openParenOffset >= 0 ? countArgs(body, openParenIndex) : 0;
+    const lineOffset = toLine(body, callStart) - 1;
+    const line = methodStartLine + lineOffset;
+    const qualifier = qualifierRaw ? qualifierRaw.replace(/\.$/, '') : undefined;
+    const isQualified = Boolean(qualifier);
+    const rawCallee = qualifier ? `${qualifier}.${name}` : name;
+
+    calls.push({
+      rawCallee,
+      simpleName: name,
+      qualifier,
+      argCount,
+      line,
+      isQualified,
+    });
     match = CALL_REGEX.exec(body);
   }
 
   CALL_REGEX.lastIndex = 0;
-  return Array.from(calls);
+  return calls;
 };
 
 const extractFields = (classBody: string, classStartLine: number): ParsedJavaField[] => {
@@ -143,7 +197,7 @@ const extractMethods = (className: string, classBody: string, absoluteStart: num
       parameters,
       modifiers,
       isConstructor: name === className,
-      calls: extractCalls(methodBody),
+      calls: extractCalls(methodBody, startLine),
       startLine,
       endLine,
     });
@@ -161,12 +215,13 @@ export const parseJavaSource = (source: string, filePath: string): ParsedJavaFil
   const packageName = packageMatch?.[1] ?? '';
 
   const imports: string[] = [];
-  const importRegex = /^[\t ]*import\s+([A-Za-z0-9_.*]+)\s*;/gm;
+  const importRegex = /^[\t ]*import\s+(static\s+)?([A-Za-z0-9_.*]+)\s*;/gm;
   let importMatch = importRegex.exec(source);
   while (importMatch) {
-    const value = importMatch[1];
+    const staticPrefix = importMatch[1] ? 'static ' : '';
+    const value = importMatch[2];
     if (value) {
-      imports.push(value);
+      imports.push(`${staticPrefix}${value}`);
     }
     importMatch = importRegex.exec(source);
   }

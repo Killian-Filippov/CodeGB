@@ -2,19 +2,20 @@ import type { KnowledgeGraph } from '../types/graph';
 import type { FileExtraction } from './symbol-processor';
 
 const toImportPackage = (value: string): string => {
-  if (value.endsWith('.*')) {
-    return value.slice(0, -2);
+  const normalized = value.startsWith('static ') ? value.slice('static '.length).trim() : value;
+  if (normalized.endsWith('.*')) {
+    return normalized.slice(0, -2);
   }
-  const parts = value.split('.');
+  const parts = normalized.split('.');
   if (parts.length <= 1) {
-    return value;
+    return normalized;
   }
   const last = parts[parts.length - 1] ?? '';
   const looksLikeType = /^[A-Z]/.test(last);
   if (looksLikeType) {
     return parts.slice(0, -1).join('.');
   }
-  return value;
+  return normalized;
 };
 
 export const processImports = (graph: KnowledgeGraph, files: FileExtraction[]): void => {

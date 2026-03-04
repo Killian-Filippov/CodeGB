@@ -51,5 +51,13 @@ test('parseJavaSource extracts package/imports/types/methods/fields/calls', () =
 
   const chargeMethod = clazz.methods.find((m) => m.name === 'charge');
   assert.ok(chargeMethod);
-  assert.deepEqual(chargeMethod?.calls.sort(), ['logCharge', 'processPayment']);
+  const callNames = chargeMethod?.calls.map((call) => call.simpleName).sort();
+  assert.deepEqual(callNames, ['logCharge', 'processPayment']);
+  assert.ok(chargeMethod?.calls.every((call) => Number.isInteger(call.argCount)));
+  assert.ok(chargeMethod?.calls.every((call) => Number.isInteger(call.line) && call.line > 0));
+
+  const runMethod = clazz.methods.find((m) => m.name === 'run');
+  assert.ok(runMethod);
+  const runCall = runMethod?.calls.find((call) => call.simpleName === 'charge');
+  assert.equal(runCall?.argCount, 1);
 });

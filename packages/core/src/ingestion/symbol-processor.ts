@@ -16,13 +16,24 @@ export interface MethodRef {
   className: string;
   typeId: string;
   filePath: string;
+  packageName: string;
+  qualifiedName: string;
+  signature: string;
+  parameterCount: number;
 }
 
 export interface PendingCall {
   callerMethodId: string;
   callerClassName: string;
-  calleeName: string;
+  callerFilePath: string;
+  callerPackageName: string;
+  simpleName: string;
+  qualifiedNameHint?: string;
+  argCount: number;
+  imports: string[];
+  source: 'tree-sitter' | 'regex-fallback';
   line: number;
+  unsupportedReason?: string;
 }
 
 export interface PendingInheritance {
@@ -67,6 +78,7 @@ export const processSymbolsForFile = (
   parsed: ParsedJavaFile,
   repoPath: string,
   projectNodeId: string,
+  parserSource: 'tree-sitter' | 'regex-fallback' = 'regex-fallback',
 ): FileExtraction => {
   const relFilePath = toRelPath(repoPath, parsed.filePath);
   const packageName = parsed.packageName || 'default';
@@ -197,6 +209,10 @@ export const processSymbolsForFile = (
         className: type.name,
         typeId: typeNodeId,
         filePath: relFilePath,
+        packageName,
+        qualifiedName: `${type.qualifiedName}.${method.name}`,
+        signature,
+        parameterCount: method.parameters.length,
       });
 
       graph.addNode({
@@ -227,12 +243,22 @@ export const processSymbolsForFile = (
         reason: 'type-method',
       });
 
-      for (const callee of method.calls) {
+      for (const callSite of method.calls) {
+        const canUseQualifiedHint =
+          Boolean(callSite.qualifier) && Boolean(callSite.qualifier?.includes('.')) && !callSite.qualifier?.includes('(');
+
         pendingCalls.push({
           callerMethodId: methodId,
           callerClassName: type.name,
-          calleeName: callee,
-          line: method.startLine,
+          callerFilePath: relFilePath,
+          callerPackageName: packageName,
+          simpleName: callSite.simpleName,
+          qualifiedNameHint: canUseQualifiedHint ? `${callSite.qualifier}.${callSite.simpleName}` : undefined,
+          argCount: callSite.argCount,
+          imports: parsed.imports,
+          source: parserSource,
+          line: callSite.line,
+          unsupportedReason: callSite.unsupportedReason,
         });
       }
     }
