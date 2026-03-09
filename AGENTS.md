@@ -59,9 +59,9 @@
 
 # 6. Architecture Governance (ADR)
 
-- Confirmed repository fact: no ADR directory, template, or required ADR workflow is fixed in this repository today.
+- Confirmed repository fact: `docs/adr/template.md` exists as ADR scaffolding, but a populated ADR record set and mandatory ADR workflow are not yet established repository policy.
 - An ADR is required before landing changes that redefine package ownership boundaries, public CLI/MCP contracts, persisted storage schema, or repository-wide backend policy.
-- Recommended future direction: when ADRs are introduced, keep them in one repository-level location and reference them from user-facing docs when they alter external behavior.
+- Recommended future direction: if ADRs become formalized, keep actual ADR records under `docs/adr/` and reference them from user-facing docs when they alter external behavior.
 - If no ADR trigger is hit, proceed without adding architecture-process overhead.
 
 # 7. Architecture Invariants
@@ -89,5 +89,5 @@
 - Update `README.md` when user-facing CLI commands, MCP startup/configuration, environment variables, storage setup, or first-run workflow change.
 - Update `docs/release-notes.md` when a release-preparation change alters the shipped version or release-gated user-visible behavior.
 - Update `benchmark.md` and `docs/benchmarks/latest.md` when benchmark results are regenerated or when backend-decision guidance changes.
-- Not yet fixed: repository-level governance docs such as `ARCHITECTURE_SUMMARY.md`, `REPO_MAP.md`, `DOMAIN.md`, or ADR records are not established companions in this repo today.
+- `ARCHITECTURE_SUMMARY.md`, `REPO_MAP.md`, and `DOMAIN.md` exist at the repository root as supplemental governance/context docs. Update them only when repository structure, architecture boundaries, or domain semantics materially change.
 - Do not create or update governance/summary docs for purely local refactors that do not change externally relevant behavior, package boundaries, ownership boundaries, or architectural decisions.

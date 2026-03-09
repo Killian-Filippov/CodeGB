@@ -15,7 +15,7 @@ This file explains the current repository layout, what each major path is for, a
 - `scripts/` - task-oriented utility scripts such as benchmark and release checks.
 - `tests/` - repository-level end-to-end test suite and test support code.
 - `AGENTS.md` - repository instructions for coding agents.
-- `ARCHITECTURE_SUMMARY.md` - currently present at the repo root but empty.
+- `ARCHITECTURE_SUMMARY.md` - root-level current-state architecture summary for package boundaries, runtime flow, and storage model.
 - `README.md` - main user-facing setup and usage documentation.
 - `benchmark.md` - top-level benchmark document.
 - `package.json` - root workspace scripts and shared dev dependencies.
@@ -27,7 +27,7 @@ This file explains the current repository layout, what each major path is for, a
 ### Planned but not yet present paths
 
 - No additional top-level layout is fixed as planned today.
-- `DOMAIN.md` is not present. `AGENTS.md` mentions it only as a not-yet-established governance companion, not as an adopted file.
+- `DOMAIN.md` exists at the repo root as a business/domain semantics reference.
 - `docs/adr/` contains only `template.md`; a real ADR record set is not yet present.
 - There is no adopted top-level `src/`, `apps/`, `services/`, or `libs/` directory.
 
@@ -122,9 +122,9 @@ Recommendation, not current fact:
 - `docs/benchmarks/` is the current home for benchmark snapshots such as `latest.md`.
 - `docs/next-plan.md` and `docs/phase1-issues-repro.md` show that task-specific planning and repro notes currently live under `docs/`.
 - Architecture and domain writeups currently belong under `docs/` if they are supplemental. Do not assume a fixed required root file for them.
-- `ARCHITECTURE_SUMMARY.md` exists at the root today, but it is empty and does not by itself establish a full root-governance-doc layout.
-- `DOMAIN.md` is not present and is not an adopted documentation home today.
-- `docs/adr/template.md` exists, but an ADR home is not yet established as repository policy. Treat `docs/adr/` as scaffolding rather than a fully adopted ADR system.
+- `ARCHITECTURE_SUMMARY.md` exists at the root today as a current-state architecture summary.
+- `DOMAIN.md` exists at the root today as a current domain/business semantics reference.
+- `docs/adr/template.md` exists, but an ADR home is not yet established as mandatory repository policy. Treat `docs/adr/` as scaffolding rather than a fully adopted ADR system.
 - Preferred future direction, not current fact: if ADRs become formalized, keep actual ADR records under `docs/adr/` and update this file when the first real ADR is added.
 
 ## 8. Change Guidance
