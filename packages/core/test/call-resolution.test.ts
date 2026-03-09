@@ -240,7 +240,7 @@ test('processCalls resolves qualified constructor call with qualifiedName-exact'
   assert.match(rel?.reason ?? '', /strategy=qualifiedName-exact/);
 });
 
-test('processCalls resolves constructor call sites and skips static-import call names with no matching imported owner', () => {
+test('processCalls resolves constructor call sites and falls back when static-import owner is missing', () => {
   const graph = createKnowledgeGraph();
   const caller = makeMethod({
     id: 'method:com.app.Caller.call',
@@ -299,8 +299,9 @@ test('processCalls resolves constructor call sites and skips static-import call 
 
   processCalls(graph, [extraction]);
   const callEdges = graph.relationships.filter((item) => item.type === 'CALLS');
-  assert.equal(callEdges.length, 1);
+  assert.equal(callEdges.length, 2);
   assert.equal(callEdges[0]?.targetId, ctor.id);
+  assert.equal(callEdges[1]?.targetId, target.id);
 });
 
 test('processCalls resolves explicit static member import with unique owner+arity match', () => {
@@ -457,6 +458,115 @@ test('processCalls does not resolve static wildcard imports when owner+arity rem
   processCalls(graph, [extraction]);
   const rel = graph.relationships.find((item) => item.type === 'CALLS');
   assert.equal(rel, undefined);
+});
+
+
+test('processCalls falls back to regular resolution when static import lookup misses', () => {
+  const graph = createKnowledgeGraph();
+  const caller = makeMethod({
+    id: 'method:com.app.Caller.invoke',
+    name: 'invoke',
+    className: 'Caller',
+    qualifiedName: 'com.app.Caller.invoke',
+    packageName: 'com.app',
+    filePath: 'src/Caller.java',
+  });
+  const sameClassTarget = makeMethod({
+    id: 'method:com.app.Caller.helper',
+    name: 'helper',
+    className: 'Caller',
+    qualifiedName: 'com.app.Caller.helper',
+    packageName: 'com.app',
+    filePath: 'src/Caller.java',
+    parameterCount: 0,
+  });
+  const staticImported = makeMethod({
+    id: 'method:com.lib.MathUtil.helper',
+    name: 'helper',
+    className: 'MathUtil',
+    qualifiedName: 'com.lib.MathUtil.helper',
+    packageName: 'com.lib',
+    parameterCount: 0,
+  });
+
+  const extraction = makeExtraction(
+    [caller, sameClassTarget, staticImported],
+    [
+      {
+        callerMethodId: caller.id,
+        callerClassName: 'Caller',
+        callerFilePath: 'src/Caller.java',
+        callerPackageName: 'com.app',
+        simpleName: 'helper',
+        argCount: 0,
+        imports: ['static java.lang.Math.*'],
+        source: 'tree-sitter',
+        line: 26,
+      },
+    ],
+    { imports: ['static java.lang.Math.*'] },
+  );
+
+  processCalls(graph, [extraction]);
+  const rel = graph.relationships.find((item) => item.type === 'CALLS');
+  assert.ok(rel);
+  assert.equal(rel?.targetId, sameClassTarget.id);
+  assert.equal(rel?.confidence, 0.85);
+  assert.match(rel?.reason ?? '', /strategy=name-arity-same-class/);
+});
+
+test('processCalls falls back when static import owner only has wrong-arity overloads', () => {
+  const graph = createKnowledgeGraph();
+  const caller = makeMethod({
+    id: 'method:com.app.Caller.invoke',
+    name: 'invoke',
+    className: 'Caller',
+    qualifiedName: 'com.app.Caller.invoke',
+    packageName: 'com.app',
+    filePath: 'src/Caller.java',
+  });
+  const sameClassTarget = makeMethod({
+    id: 'method:com.app.Caller.helper',
+    name: 'helper',
+    className: 'Caller',
+    qualifiedName: 'com.app.Caller.helper',
+    packageName: 'com.app',
+    filePath: 'src/Caller.java',
+    parameterCount: 0,
+  });
+  const staticImportedWrongArity = makeMethod({
+    id: 'method:com.lib.MathUtil.helper',
+    name: 'helper',
+    className: 'MathUtil',
+    qualifiedName: 'com.lib.MathUtil.helper',
+    packageName: 'com.lib',
+    parameterCount: 1,
+  });
+
+  const extraction = makeExtraction(
+    [caller, sameClassTarget, staticImportedWrongArity],
+    [
+      {
+        callerMethodId: caller.id,
+        callerClassName: 'Caller',
+        callerFilePath: 'src/Caller.java',
+        callerPackageName: 'com.app',
+        simpleName: 'helper',
+        argCount: 0,
+        imports: ['static com.lib.MathUtil.*'],
+        source: 'tree-sitter',
+        line: 27,
+      },
+    ],
+    { imports: ['static com.lib.MathUtil.*'] },
+  );
+
+  processCalls(graph, [extraction]);
+  const rel = graph.relationships.find((item) => item.type === 'CALLS');
+  assert.ok(rel);
+  assert.equal(rel?.targetId, sameClassTarget.id);
+  assert.equal(rel?.confidence, 0.85);
+  assert.match(rel?.reason ?? '', /strategy=name-arity-same-class/);
 });
 
 test('processCalls skips unsupported call sites even when candidates exist', () => {

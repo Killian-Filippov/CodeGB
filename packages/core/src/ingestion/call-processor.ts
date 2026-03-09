@@ -88,23 +88,39 @@ const ownerTypeOfCandidate = (candidate: MethodRef): string => {
   return candidate.qualifiedName.split('.').slice(0, -1).join('.');
 };
 
-const resolveStaticImportCall = (
+const getStaticImportArityCandidates = (
   candidates: MethodRef[],
   call: FileExtraction['pendingCalls'][number],
   scope: ImportScope,
-): ResolutionResult | undefined => {
+): MethodRef[] => {
   const explicitOwners = scope.staticMemberOwnersByName.get(call.simpleName) ?? new Set<string>();
   const allowedOwners = new Set<string>([...scope.staticWildcardOwners, ...explicitOwners]);
   if (allowedOwners.size === 0) {
-    return undefined;
+    return [];
   }
 
-  const filtered = candidates.filter((candidate) => {
+  return candidates.filter((candidate) => {
     if (candidate.parameterCount !== call.argCount) {
       return false;
     }
     return allowedOwners.has(ownerTypeOfCandidate(candidate));
   });
+};
+
+const hasStaticImportOwnerCandidate = (
+  candidates: MethodRef[],
+  call: FileExtraction['pendingCalls'][number],
+  scope: ImportScope,
+): boolean => {
+  return getStaticImportArityCandidates(candidates, call, scope).length > 0;
+};
+
+const resolveStaticImportCall = (
+  candidates: MethodRef[],
+  call: FileExtraction['pendingCalls'][number],
+  scope: ImportScope,
+): ResolutionResult | undefined => {
+  const filtered = getStaticImportArityCandidates(candidates, call, scope);
 
   if (filtered.length !== 1) {
     return undefined;
@@ -258,9 +274,18 @@ export const processCalls = (graph: KnowledgeGraph, files: FileExtraction[]): vo
       const hasStaticImportForCall =
         !call.qualifiedNameHint &&
         (scope.staticWildcardOwners.size > 0 || scope.staticMemberOwnersByName.has(call.simpleName));
-      const resolved = hasStaticImportForCall
+      const staticResolved = hasStaticImportForCall
         ? resolveStaticImportCall(candidates, call, scope)
-        : resolveCall(candidates, qualifiedCandidates, call, scope);
+        : undefined;
+      const shouldFallbackFromStatic =
+        !staticResolved &&
+        hasStaticImportForCall &&
+        !hasStaticImportOwnerCandidate(candidates, call, scope);
+      const resolved =
+        staticResolved ??
+        (hasStaticImportForCall && !shouldFallbackFromStatic
+          ? undefined
+          : resolveCall(candidates, qualifiedCandidates, call, scope));
       if (!resolved) {
         continue;
       }

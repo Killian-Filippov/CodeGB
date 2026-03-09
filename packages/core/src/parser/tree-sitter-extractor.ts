@@ -76,6 +76,65 @@ const parseImportDecl = (source: string, node: TSNode): string | undefined => {
   return `${staticPrefix}${target}`;
 };
 
+const splitTopLevelComma = (value: string): string[] => {
+  const parts: string[] = [];
+  let token = '';
+  let angleDepth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+
+  for (const char of value) {
+    if (char === '<') {
+      angleDepth += 1;
+      token += char;
+      continue;
+    }
+    if (char === '>') {
+      angleDepth = Math.max(0, angleDepth - 1);
+      token += char;
+      continue;
+    }
+    if (char === '(') {
+      parenDepth += 1;
+      token += char;
+      continue;
+    }
+    if (char === ')') {
+      parenDepth = Math.max(0, parenDepth - 1);
+      token += char;
+      continue;
+    }
+    if (char === '[') {
+      bracketDepth += 1;
+      token += char;
+      continue;
+    }
+    if (char === ']') {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      token += char;
+      continue;
+    }
+
+    if (char === ',' && angleDepth === 0 && parenDepth === 0 && bracketDepth === 0) {
+      const trimmed = token.trim();
+      if (trimmed) {
+        parts.push(trimmed);
+      }
+      token = '';
+      continue;
+    }
+
+    token += char;
+  }
+
+  const trailing = token.trim();
+  if (trailing) {
+    parts.push(trailing);
+  }
+
+  return parts;
+};
+
 const parseParameterList = (source: string, paramsNode: TSNode | null): string[] => {
   const raw = textOf(source, paramsNode).trim();
   if (!raw.startsWith('(') || !raw.endsWith(')')) {
@@ -85,10 +144,7 @@ const parseParameterList = (source: string, paramsNode: TSNode | null): string[]
   if (!inner) {
     return [];
   }
-  return inner
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
+  return splitTopLevelComma(inner);
 };
 
 const argCountOf = (argsNode: TSNode | null): number => {

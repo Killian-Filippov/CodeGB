@@ -118,6 +118,41 @@ class Child extends Parent {
   assert.equal(newCall?.unsupportedReason, undefined);
 });
 
+
+test('parseJavaSourceWithTreeSitter keeps generic method parameter lists intact', async (t) => {
+  const runtime = await loadJavaParserRuntime();
+  if (runtime.engine !== 'tree-sitter') {
+    t.skip('tree-sitter runtime unavailable');
+    return;
+  }
+
+  const source = `
+package com.acme.generics;
+
+import java.util.List;
+import java.util.Map;
+
+class GenericParams {
+  void consume(Map<String, Integer> values, List<Map<String, Integer>> nested) {
+  }
+}
+`;
+
+  const parsed = await parseJavaSourceWithTreeSitter(
+    source,
+    'src/main/java/com/acme/generics/GenericParams.java',
+  );
+  const genericParams = parsed.types.find((item) => item.name === 'GenericParams');
+  assert.ok(genericParams);
+
+  const method = genericParams?.methods.find((item) => item.name === 'consume');
+  assert.ok(method);
+  assert.deepEqual(method?.parameters, [
+    'Map<String, Integer> values',
+    'List<Map<String, Integer>> nested',
+  ]);
+});
+
 test('loadJavaParserRuntime exposes cached query support for JAVA_QUERIES', async (t) => {
   t.after(() => {
     __resetJavaParserRuntimeForTests();
