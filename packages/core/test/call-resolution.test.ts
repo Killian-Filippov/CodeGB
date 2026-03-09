@@ -460,7 +460,6 @@ test('processCalls does not resolve static wildcard imports when owner+arity rem
   assert.equal(rel, undefined);
 });
 
-
 test('processCalls falls back to regular resolution when static import lookup misses', () => {
   const graph = createKnowledgeGraph();
   const caller = makeMethod({

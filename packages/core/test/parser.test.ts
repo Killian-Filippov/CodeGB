@@ -118,7 +118,6 @@ class Child extends Parent {
   assert.equal(newCall?.unsupportedReason, undefined);
 });
 
-
 test('parseJavaSourceWithTreeSitter keeps generic method parameter lists intact', async (t) => {
   const runtime = await loadJavaParserRuntime();
   if (runtime.engine !== 'tree-sitter') {

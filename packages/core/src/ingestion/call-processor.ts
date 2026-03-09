@@ -121,7 +121,6 @@ const resolveStaticImportCall = (
   scope: ImportScope,
 ): ResolutionResult | undefined => {
   const filtered = getStaticImportArityCandidates(candidates, call, scope);
-
   if (filtered.length !== 1) {
     return undefined;
   }
