@@ -28,6 +28,10 @@ export const JAVA_QUERIES = `
 (method_invocation name: (identifier) @call.name) @call
 (method_invocation object: (_) name: (identifier) @call.name) @call
 
+; 构造调用
+(object_creation_expression type: (_) @call.constructor.type) @call.constructor
+(explicit_constructor_invocation) @call.constructor.explicit
+
 ; 字段访问
 (field_access object: (_) field: (identifier) @field.name) @field
 
@@ -41,5 +45,5 @@ export const JAVA_QUERIES = `
 
 ; 接口继承
 (interface_declaration name: (identifier) @heritage.interface
-  (extends (type_list (type_identifier) @heritage.extends))) @heritage.ext
+  (extends_interfaces (type_list (type_identifier) @heritage.extends))) @heritage.ext
 `;

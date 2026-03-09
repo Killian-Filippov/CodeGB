@@ -5,18 +5,23 @@ import type {
   ParsedJavaMethod,
   ParsedJavaType,
 } from '../types/graph';
+import { JAVA_QUERIES } from './java-queries';
+import {
+  loadJavaParserRuntime,
+  type TreeSitterQueryCapture,
+  type TreeSitterSyntaxNode,
+} from './parser-loader';
 
-type TSPoint = { row: number; column: number };
+type TSNode = TreeSitterSyntaxNode;
 
-interface TSNode {
-  type: string;
-  startIndex: number;
-  endIndex: number;
-  startPosition: TSPoint;
-  endPosition: TSPoint;
-  namedChildren: TSNode[];
-  childForFieldName: (name: string) => TSNode | null;
-}
+const TYPE_CAPTURE_NAMES = new Set([
+  'definition.class',
+  'definition.interface',
+  'definition.enum',
+  'definition.annotation',
+]);
+const METHOD_CAPTURE_NAMES = new Set(['definition.method', 'definition.constructor']);
+const CALL_CAPTURE_NAMES = new Set(['call', 'call.constructor', 'call.constructor.explicit']);
 
 const textOf = (source: string, node: TSNode | null | undefined): string => {
   if (!node) {
@@ -31,6 +36,30 @@ const splitModifiers = (value: string): string[] => {
     .split(/\s+/)
     .map((entry) => entry.trim())
     .filter(Boolean);
+};
+
+const nodeKey = (node: TSNode): string => {
+  return `${node.type}:${node.startIndex}:${node.endIndex}`;
+};
+
+const dedupeNodes = (nodes: TSNode[]): TSNode[] => {
+  const seen = new Set<string>();
+  const unique: TSNode[] = [];
+
+  for (const node of nodes) {
+    const key = nodeKey(node);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    unique.push(node);
+  }
+
+  return unique.sort((left, right) => left.startIndex - right.startIndex);
+};
+
+const isWithin = (parent: TSNode, child: TSNode): boolean => {
+  return child.startIndex >= parent.startIndex && child.endIndex <= parent.endIndex;
 };
 
 const parseImportDecl = (source: string, node: TSNode): string | undefined => {
@@ -92,84 +121,47 @@ const toQualifiedTypeNameOrUndefined = (raw: string): string | undefined => {
   return cleaned;
 };
 
-const collectCallSites = (
-  source: string,
-  bodyNode: TSNode,
-  currentTypeName: string,
-  currentTypeQualifiedName: string,
-  superClassRaw?: string,
-): ParsedJavaCallSite[] => {
-  const sites: ParsedJavaCallSite[] = [];
-  const stack = [bodyNode];
-
-  while (stack.length > 0) {
-    const node = stack.pop() as TSNode;
-    for (const child of node.namedChildren) {
-      stack.push(child);
+const findClosestTypeNode = (node: TSNode | null): TSNode | null => {
+  let cursor = node?.parent ?? null;
+  while (cursor) {
+    if (
+      cursor.type === 'class_declaration' ||
+      cursor.type === 'interface_declaration' ||
+      cursor.type === 'enum_declaration' ||
+      cursor.type === 'annotation_type_declaration'
+    ) {
+      return cursor;
     }
+    cursor = cursor.parent;
+  }
+  return null;
+};
 
-    if (node.type === 'method_invocation') {
-      const nameNode = node.childForFieldName('name');
-      const objectNode = node.childForFieldName('object');
-      const argsNode = node.childForFieldName('arguments');
-      const simpleName = textOf(source, nameNode).trim();
-      if (!simpleName) {
-        continue;
-      }
-      const qualifier = textOf(source, objectNode).trim() || undefined;
-      const isQualified = Boolean(qualifier);
-      const rawCallee = qualifier ? `${qualifier}.${simpleName}` : simpleName;
-      sites.push({
-        rawCallee,
-        simpleName,
-        qualifier,
-        argCount: argCountOf(argsNode),
-        line: (nameNode ?? node).startPosition.row + 1,
-        isQualified,
-      });
+const groupTypeScopedNodes = (
+  captures: TreeSitterQueryCapture[],
+  captureNames: Set<string>,
+): Map<string, TSNode[]> => {
+  const scoped = new Map<string, TSNode[]>();
+
+  for (const capture of captures) {
+    if (!captureNames.has(capture.name)) {
       continue;
     }
-
-    if (node.type === 'object_creation_expression') {
-      const typeNode = node.childForFieldName('type');
-      const argsNode = node.childForFieldName('arguments');
-      const typeName = textOf(source, typeNode).trim();
-      const simpleName = toSimpleTypeName(typeName);
-      const qualifiedTypeName = toQualifiedTypeNameOrUndefined(typeName);
-      if (!simpleName) {
-        continue;
-      }
-      sites.push({
-        rawCallee: typeName ? `${typeName}.${simpleName}` : simpleName,
-        simpleName,
-        qualifier: qualifiedTypeName ?? (typeName || undefined),
-        argCount: argCountOf(argsNode),
-        line: node.startPosition.row + 1,
-        isQualified: Boolean(qualifiedTypeName ?? typeName),
-      });
+    const owner = findClosestTypeNode(capture.node);
+    if (!owner) {
       continue;
     }
-
-    if (node.type === 'explicit_constructor_invocation') {
-      const argsNode = node.childForFieldName('arguments');
-      const raw = textOf(source, node).trim();
-      const isThis = raw.startsWith('this');
-      const superSimpleName = superClassRaw ? toSimpleTypeName(superClassRaw) : '';
-      const superQualifiedName = superClassRaw ? toQualifiedTypeNameOrUndefined(superClassRaw) : undefined;
-      const simpleName = isThis ? currentTypeName : superSimpleName || 'super';
-      const qualifier = isThis ? currentTypeQualifiedName : superQualifiedName;
-      sites.push({
-        rawCallee: qualifier ? `${qualifier}.${simpleName}` : simpleName,
-        simpleName,
-        qualifier,
-        argCount: argCountOf(argsNode),
-        line: node.startPosition.row + 1,
-        isQualified: Boolean(qualifier),
-      });
-    }
+    const key = nodeKey(owner);
+    const bucket = scoped.get(key) ?? [];
+    bucket.push(capture.node);
+    scoped.set(key, bucket);
   }
 
-  return sites;
+  for (const [key, nodes] of scoped) {
+    scoped.set(key, dedupeNodes(nodes));
+  }
+
+  return scoped;
 };
 
 const parseFieldDecl = (source: string, node: TSNode): ParsedJavaField[] => {
@@ -199,12 +191,80 @@ const parseFieldDecl = (source: string, node: TSNode): ParsedJavaField[] => {
   return fields;
 };
 
+const parseCallSite = (
+  source: string,
+  node: TSNode,
+  currentTypeName: string,
+  currentTypeQualifiedName: string,
+  superClassRaw?: string,
+): ParsedJavaCallSite | undefined => {
+  if (node.type === 'method_invocation') {
+    const nameNode = node.childForFieldName('name');
+    const objectNode = node.childForFieldName('object');
+    const argsNode = node.childForFieldName('arguments');
+    const simpleName = textOf(source, nameNode).trim();
+    if (!simpleName) {
+      return undefined;
+    }
+    const qualifier = textOf(source, objectNode).trim() || undefined;
+    const isQualified = Boolean(qualifier);
+    return {
+      rawCallee: qualifier ? `${qualifier}.${simpleName}` : simpleName,
+      simpleName,
+      qualifier,
+      argCount: argCountOf(argsNode),
+      line: (nameNode ?? node).startPosition.row + 1,
+      isQualified,
+    };
+  }
+
+  if (node.type === 'object_creation_expression') {
+    const typeNode = node.childForFieldName('type');
+    const argsNode = node.childForFieldName('arguments');
+    const typeName = textOf(source, typeNode).trim();
+    const simpleName = toSimpleTypeName(typeName);
+    const qualifiedTypeName = toQualifiedTypeNameOrUndefined(typeName);
+    if (!simpleName) {
+      return undefined;
+    }
+    return {
+      rawCallee: typeName ? `${typeName}.${simpleName}` : simpleName,
+      simpleName,
+      qualifier: qualifiedTypeName ?? (typeName || undefined),
+      argCount: argCountOf(argsNode),
+      line: node.startPosition.row + 1,
+      isQualified: Boolean(qualifiedTypeName ?? typeName),
+    };
+  }
+
+  if (node.type === 'explicit_constructor_invocation') {
+    const argsNode = node.childForFieldName('arguments');
+    const raw = textOf(source, node).trim();
+    const isThis = raw.startsWith('this');
+    const superSimpleName = superClassRaw ? toSimpleTypeName(superClassRaw) : '';
+    const superQualifiedName = superClassRaw ? toQualifiedTypeNameOrUndefined(superClassRaw) : undefined;
+    const simpleName = isThis ? currentTypeName : superSimpleName || 'super';
+    const qualifier = isThis ? currentTypeQualifiedName : superQualifiedName;
+    return {
+      rawCallee: qualifier ? `${qualifier}.${simpleName}` : simpleName,
+      simpleName,
+      qualifier,
+      argCount: argCountOf(argsNode),
+      line: node.startPosition.row + 1,
+      isQualified: Boolean(qualifier),
+    };
+  }
+
+  return undefined;
+};
+
 const parseMethodDecl = (
   source: string,
   className: string,
   classQualifiedName: string,
   superClassRaw: string | undefined,
   node: TSNode,
+  callNodes: TSNode[],
 ): ParsedJavaMethod | undefined => {
   if (node.type !== 'method_declaration' && node.type !== 'constructor_declaration') {
     return undefined;
@@ -212,12 +272,20 @@ const parseMethodDecl = (
 
   const nameNode = node.childForFieldName('name');
   const paramsNode = node.childForFieldName('parameters');
-  const bodyNode = node.childForFieldName('body');
   const typeNode = node.childForFieldName('type');
+  const bodyNode = node.childForFieldName('body');
   const name = textOf(source, nameNode).trim();
   if (!name) {
     return undefined;
   }
+
+  const calls = bodyNode
+    ? dedupeNodes(callNodes.filter((callNode) => isWithin(bodyNode, callNode)))
+        .map((callNode) =>
+          parseCallSite(source, callNode, className, classQualifiedName, superClassRaw),
+        )
+        .filter((entry): entry is ParsedJavaCallSite => Boolean(entry))
+    : [];
 
   return {
     name,
@@ -225,36 +293,23 @@ const parseMethodDecl = (
     parameters: parseParameterList(source, paramsNode),
     modifiers: splitModifiers(textOf(source, node.childForFieldName('modifiers'))),
     isConstructor: node.type === 'constructor_declaration' || name === className,
-    calls: bodyNode ? collectCallSites(source, bodyNode, className, classQualifiedName, superClassRaw) : [],
+    calls,
     startLine: node.startPosition.row + 1,
     endLine: node.endPosition.row + 1,
   };
 };
 
-const collectNamedTypeNodes = (root: TSNode): TSNode[] => {
-  const types = new Set(['class_declaration', 'interface_declaration', 'enum_declaration', 'annotation_type_declaration']);
-  const queue = [...root.namedChildren];
-  const result: TSNode[] = [];
-
-  while (queue.length > 0) {
-    const node = queue.shift() as TSNode;
-    if (types.has(node.type)) {
-      result.push(node);
-      continue;
-    }
-    for (const child of node.namedChildren) {
-      queue.push(child);
-    }
-  }
-
-  return result;
-};
-
-const parseTypeDecl = (source: string, packageName: string, node: TSNode): ParsedJavaType | undefined => {
+const parseTypeDecl = (
+  source: string,
+  packageName: string,
+  node: TSNode,
+  fieldNodes: TSNode[],
+  methodNodes: TSNode[],
+  callNodes: TSNode[],
+): ParsedJavaType | undefined => {
   const nameNode = node.childForFieldName('name');
-  const bodyNode = node.childForFieldName('body');
   const name = textOf(source, nameNode).trim();
-  if (!name || !bodyNode) {
+  if (!name) {
     return undefined;
   }
 
@@ -268,7 +323,10 @@ const parseTypeDecl = (source: string, packageName: string, node: TSNode): Parse
           : 'Class';
 
   const superClassNode = node.childForFieldName('superclass');
-  const interfacesNode = node.childForFieldName('interfaces');
+  const interfacesNode =
+    node.childForFieldName('interfaces') ??
+    node.childForFieldName('extends_interfaces') ??
+    node.childForFieldName('extends');
   const superClass = textOf(source, superClassNode).replace(/^extends\s+/, '').trim() || undefined;
   const interfacesText = textOf(source, interfacesNode)
     .replace(/^(implements|extends)\s+/, '')
@@ -278,19 +336,15 @@ const parseTypeDecl = (source: string, packageName: string, node: TSNode): Parse
     .map((entry) => entry.trim())
     .filter(Boolean);
 
-  const methods: ParsedJavaMethod[] = [];
-  const fields: ParsedJavaField[] = [];
   const classQualifiedName = packageName ? `${packageName}.${name}` : name;
-  for (const child of bodyNode.namedChildren) {
-    if (child.type === 'field_declaration') {
-      fields.push(...parseFieldDecl(source, child));
-      continue;
-    }
-    const method = parseMethodDecl(source, name, classQualifiedName, superClass, child);
-    if (method) {
-      methods.push(method);
-    }
-  }
+  const fields = dedupeNodes(fieldNodes)
+    .map((fieldNode) => parseFieldDecl(source, fieldNode))
+    .flat();
+  const methods = dedupeNodes(methodNodes)
+    .map((methodNode) =>
+      parseMethodDecl(source, name, classQualifiedName, superClass, methodNode, callNodes),
+    )
+    .filter((entry): entry is ParsedJavaMethod => Boolean(entry));
 
   return {
     kind,
@@ -306,28 +360,48 @@ const parseTypeDecl = (source: string, packageName: string, node: TSNode): Parse
   };
 };
 
-export const parseJavaSourceWithTreeSitter = async (source: string, filePath: string): Promise<ParsedJavaFile> => {
-  const [parserModule, javaModule] = await Promise.all([import('tree-sitter'), import('tree-sitter-java')]);
-  const ParserCtor = (parserModule.default ?? parserModule) as {
-    new (): { setLanguage: (language: unknown) => void; parse: (text: string) => { rootNode: TSNode } };
-  };
-  const javaLanguage = (javaModule.default ?? javaModule) as unknown;
-  const parser = new ParserCtor();
-  parser.setLanguage(javaLanguage);
+export const parseJavaSourceWithTreeSitter = async (
+  source: string,
+  filePath: string,
+): Promise<ParsedJavaFile> => {
+  const runtime = await loadJavaParserRuntime();
+  if (runtime.engine !== 'tree-sitter') {
+    throw new Error('tree-sitter runtime unavailable');
+  }
 
+  const parser = runtime.createParser();
+  const query = runtime.createQuery(JAVA_QUERIES);
   const tree = parser.parse(source);
   const root = tree.rootNode;
+  const captures = query.captures(root);
+  const typeNodes = dedupeNodes(
+    captures
+      .filter((capture) => TYPE_CAPTURE_NAMES.has(capture.name))
+      .map((capture) => capture.node),
+  );
+  const scopedFieldNodes = groupTypeScopedNodes(captures, new Set(['definition.field']));
+  const scopedMethodNodes = groupTypeScopedNodes(captures, METHOD_CAPTURE_NAMES);
+  const scopedCallNodes = groupTypeScopedNodes(captures, CALL_CAPTURE_NAMES);
+
   const packageDecl = root.namedChildren.find((node) => node.type === 'package_declaration');
   const packageText = textOf(source, packageDecl).trim();
   const packageName = packageText.replace(/^package\s+/, '').replace(/;$/, '').trim();
-
-  const imports = root.namedChildren
-    .filter((node) => node.type === 'import_declaration')
+  const imports = dedupeNodes(
+    captures.filter((capture) => capture.name === 'import').map((capture) => capture.node),
+  )
     .map((node) => parseImportDecl(source, node))
     .filter((entry): entry is string => Boolean(entry));
-
-  const types = collectNamedTypeNodes(root)
-    .map((node) => parseTypeDecl(source, packageName, node))
+  const types = typeNodes
+    .map((node) =>
+      parseTypeDecl(
+        source,
+        packageName,
+        node,
+        scopedFieldNodes.get(nodeKey(node)) ?? [],
+        scopedMethodNodes.get(nodeKey(node)) ?? [],
+        scopedCallNodes.get(nodeKey(node)) ?? [],
+      ),
+    )
     .filter((entry): entry is ParsedJavaType => Boolean(entry));
 
   return {

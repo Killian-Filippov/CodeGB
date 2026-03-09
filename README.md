@@ -5,6 +5,7 @@ CodeGB is a code knowledge graph tool for local developer environments. It provi
 ## Feature Overview
 
 - Java code parsing and graph construction (classes, methods, fields, calls, inheritance, imports)
+- Tree-sitter-first Java extraction, with regex kept only as a compatibility fallback
 - MCP tools:
   - `query`
   - `context`
@@ -136,6 +137,13 @@ MCP only provides queries. For first-time usage, run `init + index` first:
 pnpm exec tsx packages/cli/src/index.ts init /ABS/PATH/TO/REPO --storage /ABS/PATH/TO/.javakg
 pnpm exec tsx packages/cli/src/index.ts index /ABS/PATH/TO/REPO --storage /ABS/PATH/TO/.javakg
 ```
+
+## Java Parser Runtime
+
+- The indexing pipeline uses `tree-sitter` as the primary Java parser and extraction path.
+- `JAVA_QUERIES` is the authoritative query template used by the tree-sitter extractor for symbol and relation capture.
+- The legacy regex extractor is still present only as a compatibility fallback when the tree-sitter runtime is unavailable or a single-file tree-sitter parse fails during indexing.
+- Operationally, you should treat CodeGB as a tree-sitter-based Java indexer, not as a dual-parser system.
 
 ## FAQ
 

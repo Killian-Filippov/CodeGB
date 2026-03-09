@@ -5,6 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { runPipelineFromRepo } from '../src/ingestion/pipeline.ts';
+import {
+  __resetJavaParserRuntimeForTests,
+  __setJavaParserRuntimeForTests,
+} from '../src/parser/parser-loader.ts';
 
 async function makeRepo(): Promise<string> {
   const repoPath = await fs.mkdtemp(path.join(os.tmpdir(), 'javakg-repo-'));
@@ -103,4 +107,42 @@ test('runPipelineFromRepo builds Java graph with key relations', async () => {
   assert.ok(constructorCallEdges.length >= 2);
 
   assert.ok(result.persisted);
+});
+
+test('runPipelineFromRepo falls back to regex extraction when tree-sitter parsing fails', async (t) => {
+  t.after(() => {
+    __resetJavaParserRuntimeForTests();
+  });
+
+  const repoPath = await makeRepo();
+  const storagePath = await fs.mkdtemp(path.join(os.tmpdir(), 'javakg-db-fallback-'));
+
+  __setJavaParserRuntimeForTests({
+    engine: 'tree-sitter',
+    available: true,
+    language: {},
+    createParser: () => ({
+      setLanguage: () => undefined,
+      parse: () => {
+        throw new Error('synthetic tree-sitter failure');
+      },
+    }),
+    createQuery: () => ({
+      captures: () => [],
+    }),
+  });
+
+  const result = await runPipelineFromRepo({
+    repoPath,
+    storagePath,
+    projectName: 'fallback-demo',
+  });
+
+  const paymentProcessor = result.graph.nodes.find(
+    (node) => node.label === 'Class' && node.properties.name === 'PaymentProcessor',
+  );
+  assert.ok(paymentProcessor);
+
+  const callEdges = result.graph.relationships.filter((rel) => rel.type === 'CALLS');
+  assert.ok(callEdges.length > 0);
 });

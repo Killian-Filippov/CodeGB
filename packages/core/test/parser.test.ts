@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { parseJavaSource } from '../src/parser/ast-extractor.ts';
-import { loadJavaParserRuntime } from '../src/parser/parser-loader.ts';
+import {
+  __resetJavaParserRuntimeForTests,
+  loadJavaParserRuntime,
+} from '../src/parser/parser-loader.ts';
 import { parseJavaSourceWithTreeSitter } from '../src/parser/tree-sitter-extractor.ts';
 
 const JAVA_SOURCE = `
@@ -113,4 +116,26 @@ class Child extends Parent {
   assert.ok(newCall);
   assert.equal(newCall?.argCount, 1);
   assert.equal(newCall?.unsupportedReason, undefined);
+});
+
+test('loadJavaParserRuntime exposes cached query support for JAVA_QUERIES', async (t) => {
+  t.after(() => {
+    __resetJavaParserRuntimeForTests();
+  });
+
+  const runtime = await loadJavaParserRuntime();
+  if (runtime.engine !== 'tree-sitter') {
+    t.skip('tree-sitter runtime unavailable');
+    return;
+  }
+
+  const firstQuery = runtime.createQuery('(class_declaration) @definition.class');
+  const secondQuery = runtime.createQuery('(class_declaration) @definition.class');
+  assert.equal(firstQuery, secondQuery);
+
+  const parser = runtime.createParser();
+  const tree = parser.parse('class Sample {}');
+  const captures = firstQuery.captures(tree.rootNode);
+  assert.equal(captures[0]?.name, 'definition.class');
+  assert.equal(captures[0]?.node.type, 'class_declaration');
 });
