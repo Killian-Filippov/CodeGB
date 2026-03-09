@@ -52,6 +52,10 @@ type DbBackend = 'auto' | 'native' | 'wasm';
 const DB_BACKEND_ENV_KEY = 'CODEGB_DB_BACKEND';
 let hasPrintedAutoFallbackDiagnostic = false;
 
+export const __resetKuzuAdapterDiagnosticsForTests = (): void => {
+  hasPrintedAutoFallbackDiagnostic = false;
+};
+
 const tryLoadKuzu = (): KuzuRuntime | null => {
   const candidates = ['kuzu', 'kuzu/kuzu-source/tools/nodejs_api/src_js/index.js'];
   for (const candidate of candidates) {
@@ -176,7 +180,7 @@ export class KuzuAdapter {
       return true;
     }
     if (this.backend === 'auto') {
-      return !this.autoNativeFallbackActivated;
+      return this.autoNativeFallbackActivated;
     }
     return false;
   }
@@ -238,7 +242,7 @@ export class KuzuAdapter {
       hasPrintedAutoFallbackDiagnostic = true;
       const detail = reason instanceof Error ? reason.message : String(reason);
       console.warn(
-        `[CodeGB] ${DB_BACKEND_ENV_KEY}=auto: wasm backend failed, falling back to native backend (${detail}).`,
+        `[CodeGB] ${DB_BACKEND_ENV_KEY}=auto: native backend failed, falling back to wasm backend (${detail}).`,
       );
     }
   }

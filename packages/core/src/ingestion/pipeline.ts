@@ -3,6 +3,8 @@ import path from 'node:path';
 
 import { createKnowledgeGraph } from '../graph/graph';
 import { parseJavaSource } from '../parser/ast-extractor';
+import { loadJavaParserRuntime } from '../parser/parser-loader';
+import { parseJavaSourceWithTreeSitter } from '../parser/tree-sitter-extractor';
 import { KuzuAdapter } from '../storage/kuzu-adapter';
 import type { KnowledgeGraph } from '../types/graph';
 import { processCalls } from './call-processor';
@@ -82,6 +84,7 @@ const filterExistingJavaFiles = async (repoPath: string, filePaths: string[]): P
 const buildGraphFromFiles = async (repoPath: string, projectName: string, javaFiles: string[]): Promise<KnowledgeGraph> => {
   const graph = createKnowledgeGraph();
   const projectNodeId = `project:${projectName}`;
+  const runtime = await loadJavaParserRuntime();
 
   graph.addNode({
     id: projectNodeId,
@@ -96,8 +99,17 @@ const buildGraphFromFiles = async (repoPath: string, projectName: string, javaFi
   const extractions = [];
   for (const filePath of javaFiles) {
     const source = await fs.readFile(filePath, 'utf8');
-    const parsed = parseJavaSource(source, filePath);
-    extractions.push(processSymbolsForFile(graph, parsed, repoPath, projectNodeId));
+    let parsed = parseJavaSource(source, filePath);
+    let parserSource: 'tree-sitter' | 'regex-fallback' = 'regex-fallback';
+    if (runtime.engine === 'tree-sitter') {
+      try {
+        parsed = await parseJavaSourceWithTreeSitter(source, filePath);
+        parserSource = 'tree-sitter';
+      } catch {
+        parsed = parseJavaSource(source, filePath);
+      }
+    }
+    extractions.push(processSymbolsForFile(graph, parsed, repoPath, projectNodeId, parserSource));
   }
 
   processImports(graph, extractions);

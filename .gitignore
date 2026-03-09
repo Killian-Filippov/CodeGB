@@ -8,3 +8,7 @@ coverage/
 !/benchmark.md
 !/docs/release-notes.md
 !/docs/benchmarks/latest.md
+!AGENTS.md
+!ARCHITECTURE_SUMMARY.md
+!DOMAIN.md
+!REPO_MAP.md
