@@ -1,5 +1,15 @@
 # CodeGB
 
+# ⚠️ This repository has moved
+
+CodeGB is no longer maintained.
+
+The project has been renamed and continued as **Tally**.
+
+➡️ New repository: https://github.com/Killian-Filippov/Tally
+
+This repository is archived and kept only for historical reference.
+
 CodeGB is a code knowledge graph tool for local developer environments. It provides an MCP Server that runs on your machine and can be called by MCP Clients (such as Claude/Cursor).
 
 ## Feature Overview
